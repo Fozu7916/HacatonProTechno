@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-VK_TOKEN = os.getenv("VK_TOKEN")
+VK_TOKEN = os.getenv("VK_SERVICE_TOKEN") or os.getenv("VK_TOKEN")
 GROUP_ID = os.getenv("GROUP_ID")  # числовой ID группы (без минуса)
 
 
@@ -53,6 +53,54 @@ def fetch_comments(vk, post_id: int, count: int = 100) -> list[dict]:
         time.sleep(0.34)  # соблюдаем лимит VK API (3 запроса/сек)
 
     return all_comments
+
+
+def get_photo_url(vk, photo_id):
+    """Получает прямую ссылку на изображение по его VK ID."""
+    try:
+        # photo_id имеет формат photo123_456
+        pid = photo_id.replace("photo", "")
+        # Явно указываем версию API и параметры
+        res = vk.photos.getById(photos=pid, extended=0)
+        if res and len(res) > 0:
+            # Ищем самый большой размер (обычно тип 'w' или 'z')
+            sizes = res[0].get('sizes', [])
+            if sizes:
+                # Сортируем по ширине и берем максимум
+                best_size = sorted(sizes, key=lambda x: x.get('width', 0))[-1]
+                return best_size.get('url')
+        return None
+    except Exception as e:
+        print(f"[VK Photo URL Error] {e}")
+        return None
+
+def upload_photo(vk, photo_file):
+    """Загружает фото на сервера VK и возвращает строку вложения."""
+    import requests
+    gid = str(os.getenv("GROUP_ID", "")).strip().replace("-", "")
+    
+    try:
+        # Получаем сервер для загрузки именно на стену ГРУППЫ
+        upload_server = vk.photos.getWallUploadServer(group_id=gid)
+        upload_url = upload_server['upload_url']
+        
+        # Отправляем файл
+        files = {'photo': photo_file}
+        response = requests.post(upload_url, files=files).json()
+        
+        # Сохраняем фото в альбом группы
+        save_res = vk.photos.saveWallPhoto(
+            group_id=gid,
+            photo=response['photo'],
+            server=response['server'],
+            hash=response['hash']
+        )[0]
+        
+        # Возвращаем ID, который будет доступен всем админам группы
+        return f"photo{save_res['owner_id']}_{save_res['id']}"
+    except Exception as e:
+        print(f"[VK Upload Error] {e}")
+        raise e
 
 
 def parse_all_posts(n: int = None) -> list[dict]:

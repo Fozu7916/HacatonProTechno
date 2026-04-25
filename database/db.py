@@ -1,0 +1,172 @@
+import mysql.connector
+import os
+from dotenv import load_dotenv
+
+# Загружаем .env из корня (на два уровня выше)
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+def get_connection():
+    return mysql.connector.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", 3306)),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        database=os.getenv("DB_NAME"),
+    )
+
+def init_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Таблица постов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id            INT PRIMARY KEY,
+            owner_id      BIGINT NOT NULL,
+            date          DATETIME NOT NULL,
+            text          TEXT,
+            likes         INT DEFAULT 0,
+            reposts       INT DEFAULT 0,
+            views         INT DEFAULT 0,
+            comments      INT DEFAULT 0,
+            attachments   JSON,
+            fetched_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Таблица комментариев
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS post_comments (
+            id          INT PRIMARY KEY,
+            post_id     INT NOT NULL,
+            from_id     BIGINT NOT NULL,
+            date        DATETIME NOT NULL,
+            text        TEXT,
+            likes       INT DEFAULT 0,
+            FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Таблица очереди
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS post_queue (
+            id            INT AUTO_INCREMENT PRIMARY KEY,
+            post_id       INT,
+            suggested_text TEXT,
+            attachments   TEXT,
+            priority      INT DEFAULT 1,
+            author_role   ENUM('smm', 'volunteer') DEFAULT 'volunteer',
+            scheduled_at  DATETIME DEFAULT NULL,
+            predicted_er  FLOAT,
+            status        ENUM('pending', 'editing', 'ready', 'posted') DEFAULT 'pending',
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Таблица шаблонов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS templates (
+            id      INT AUTO_INCREMENT PRIMARY KEY,
+            name    VARCHAR(100),
+            content TEXT
+        )
+    """)
+
+    # Таблица настроек
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            `key`   VARCHAR(50) PRIMARY KEY,
+            `value` VARCHAR(255)
+        )
+    """)
+    cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('posts_per_day', '3')")
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print("[DB] Все таблицы инициализированы.")
+
+def get_setting(key, default=None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT `value` FROM settings WHERE `key` = %s", (key,))
+    res = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return res[0] if res else default
+
+def set_setting(key, value):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("REPLACE INTO settings (`key`, `value`) VALUES (%s, %s)", (key, str(value)))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def get_templates():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM templates")
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
+
+def add_template(name, content):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO templates (name, content) VALUES (%s, %s)", (name, content))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def upsert_post(post: dict):
+    import json
+    from datetime import datetime
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO posts (id, owner_id, date, text, likes, reposts, views, comments, attachments)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            text = VALUES(text), likes = VALUES(likes), reposts = VALUES(reposts),
+            views = VALUES(views), comments = VALUES(comments), attachments = VALUES(attachments)
+    """, (
+        post["id"], post["owner_id"], datetime.fromtimestamp(post["date"]),
+        post.get("text", ""), post.get("likes", {}).get("count", 0),
+        post.get("reposts", {}).get("count", 0), post.get("views", {}).get("count", 0),
+        post.get("comments", {}).get("count", 0),
+        json.dumps(post.get("attachments", []), ensure_ascii=False),
+    ))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def upsert_comment(comment: dict, post_id: int):
+    from datetime import datetime
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO post_comments (id, post_id, from_id, date, text, likes)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE text = VALUES(text), likes = VALUES(likes)
+    """, (
+        comment["id"], post_id, comment["from_id"],
+        datetime.fromtimestamp(comment["date"]), comment.get("text", ""),
+        comment.get("likes", {}).get("count", 0),
+    ))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def add_to_queue(post_id: int, text: str, priority: int, er: float, scheduled_at: datetime = None, attachments: str = None):
+    """Добавляет пост в очередь на публикацию."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO post_queue (post_id, suggested_text, priority, predicted_er, scheduled_at, attachments)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (post_id, text, priority, er, scheduled_at, attachments))
+    conn.commit()
+    cursor.close()
+    conn.close()

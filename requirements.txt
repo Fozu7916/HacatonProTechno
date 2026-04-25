@@ -2,3 +2,7 @@ vk-api==11.9.9
 mysql-connector-python==8.3.0
 python-dotenv==1.0.1
 requests==2.31.0
+pandas
+fpdf2
+matplotlib
+streamlit-calendar

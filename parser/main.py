@@ -1,6 +1,12 @@
 import argparse
-from db import init_db, upsert_post, upsert_comment
-from vk_parser import parse_all_posts
+import sys
+import os
+
+# Добавляем корень проекта в пути, чтобы импорты работали
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
+from database.db import init_db, upsert_post, upsert_comment
+from parser.vk_parser import parse_all_posts
 
 
 def main():

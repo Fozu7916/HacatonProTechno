@@ -1,0 +1,400 @@
+import streamlit as st
+import pandas as pd
+import os
+import time
+from datetime import datetime
+from streamlit_calendar import calendar
+from database.db import get_connection, init_db, get_setting, set_setting, add_template, get_templates, add_to_queue
+from analytics.stats import get_dry_stats
+from analytics.processor import process_incoming_post
+from publisher.scheduler import publish_next_post
+st.set_page_config(page_title="VK Volunteer Panel", layout="wide")
+
+st.title("📱 Панель управления контентом")
+
+# Инициализация БД при первом запуске
+if st.sidebar.button("Инициализировать БД"):
+    from database.db import init_db
+    import importlib
+    import database.db
+    importlib.reload(database.db) # Принудительно обновляем модуль в памяти
+    database.db.init_db()
+    st.sidebar.success("Таблицы созданы и обновлены!")
+    st.rerun()
+
+# --- БОКОВАЯ ПАНЕЛЬ ---
+st.sidebar.header("👤 Авторизация")
+role = st.sidebar.selectbox("Выберите роль", ["Волонтер", "Редактор", "СММ-специалист", "Руководитель"])
+
+st.sidebar.header("⚙️ Управление")
+# Слайдер теперь от 1 поста
+stat_limit = st.sidebar.slider("Глубина анализа (постов)", 1, 200, 50)
+
+if st.sidebar.button("🔄 Обновить данные из VK"):
+    with st.sidebar.status("Парсинг..."):
+        from parser.vk_parser import parse_all_posts
+        from database.db import upsert_post
+        data = parse_all_posts(n=20)
+        for item in data:
+            upsert_post(item["post"])
+    st.sidebar.success("Обновлено!")
+    st.rerun()
+
+# Настройки и отчеты только для Руководителя
+if role == "Руководитель":
+    st.sidebar.header("🔑 Панель Руководителя")
+    
+    report_days = st.sidebar.number_input("Период отчета (дней)", 1, 365, 7)
+    if st.sidebar.button("📈 Сформировать отчет"):
+        from analytics.stats import get_stats_by_days
+        st.session_state['active_report'] = get_stats_by_days(report_days)
+        if st.session_state['active_report']:
+            st.toast(f"Отчет за {report_days} дн. готов!")
+        else:
+            st.sidebar.error("Нет данных за этот период")
+
+    if 'active_report' in st.session_state and st.session_state['active_report']:
+        report_data = st.session_state['active_report']
+        with st.expander("📋 Расширенный отчет для руководства", expanded=True):
+            # 1. Метрики
+            report = report_data["stats"]
+            col1, col2 = st.columns(2)
+            for i, (k, v) in enumerate(report.items()):
+                if i % 2 == 0: col1.metric(k, v)
+                else: col2.metric(k, v)
+            
+            # 2. Визуализация
+            st.subheader("📈 Динамика охвата и лайков")
+            st.line_chart(report_data["chart_data"])
+
+            # 2.1 Подробная таблица для руководства
+            st.subheader("📅 Ежедневная статистика")
+            st.dataframe(report_data["daily_stats"], use_container_width=True)
+
+            # 3. Топ-3 поста
+            st.subheader("🏆 Топ-3 лучших поста за период")
+            for post in report_data["top_3"]:
+                st.markdown(f"**Просмотры: {post['views']} | Лайки: {post['likes']}**")
+                st.caption(post['text'])
+                st.link_button("Открыть пост", post['link'])
+                st.divider()
+            
+            # 4. Кнопка скачивания PDF
+            from analytics.stats import generate_pdf_report
+            try:
+                pdf_output = generate_pdf_report(report_data, chart_df=report_data["chart_data"])
+                pdf_bytes = bytes(pdf_output)
+                st.download_button(
+                    label="📥 Скачать отчет в PDF",
+                    data=pdf_bytes,
+                    file_name=f"report.pdf",
+                    mime="application/pdf"
+                )
+            except Exception as e:
+                st.error(f"Ошибка генерации PDF: {e}")
+st.sidebar.header("📊 Статистика")
+stats, _ = get_dry_stats(limit=stat_limit)
+if stats:
+    for key, val in stats.items():
+        st.sidebar.metric(key, val)
+
+# --- ОСНОВНАЯ ОБЛАСТЬ ---
+if role == "Руководитель":
+    tab_list = ["📅 Очередь", "📈 Архив"]
+    tabs = st.tabs(tab_list)
+    tab_q, tab_a = tabs[0], tabs[1]
+else:
+    tab_list = ["📝 Редактор", "📅 Очередь", "📈 Архив"]
+    tabs = st.tabs(tab_list)
+    tab_r, tab_q, tab_a = tabs[0], tabs[1], tabs[2]
+
+# Логика вкладки Редактор (только если она есть)
+if role != "Руководитель":
+    with tab_r:
+        if role == "СММ-специалист":
+            st.header("🚀 Панель СММ")
+            
+            # Блок рекомендаций на основе аналитики
+            from analytics.stats import get_stats_by_days
+            with st.expander("💡 Рекомендации по контенту", expanded=True):
+                rec_data = get_stats_by_days(30) # Анализ за месяц
+                if rec_data:
+                    st.success(f"🔥 **Лучшее время для публикации:** {rec_data['stats']['Лучшие часы']}")
+                    st.info(f"📅 **Самый активный день:** {rec_data['stats']['Лучший день недели']}")
+                    st.write(f"🔍 **Популярные темы:** {rec_data['stats']['Ключевые темы']}")
+                else:
+                    st.info("Соберите больше данных из VK для получения рекомендаций")
+
+            # Управление количеством постов в день            from database.db import get_setting, set_setting
+            current_ppd = int(get_setting('posts_per_day', 3))
+            new_ppd = st.number_input("Лимит постов в день (план)", 1, 24, current_ppd)
+            if new_ppd != current_ppd:
+                set_setting('posts_per_day', new_ppd)
+                st.success(f"Лимит постов обновлен до {new_ppd}")
+            
+            st.divider()
+            
+            smm_mode = st.radio("Режим создания", ["Свободный текст", "Создание афиши по шаблону"])
+            
+            if smm_mode == "Свободный текст":
+                smm_text = st.text_area("Текст официального поста", height=150, key="smm_text")
+                smm_uploaded_file = st.file_uploader("Прикрепите фото", type=['png', 'jpg', 'jpeg'], key="smm_photo_free")
+            else:
+                from database.db import get_templates
+                templates = get_templates()
+                if templates:
+                    t_names = [t['name'] for t in templates]
+                    sel_t = st.selectbox("Выберите шаблон афиши", t_names, key="smm_tpl_sel")
+                    template_obj = next(t for t in templates if t['name'] == sel_t)
+                    template_content = template_obj['content']
+                    
+                    st.info(f"📋 **Структура шаблона:**\n\n{template_content}")
+                    
+                    # Динамические поля для СММ
+                    import re
+                    tags = re.findall(r"\{(.*?)\}", template_content)
+                    smm_inputs = {}
+                    if tags:
+                        st.subheader("Заполните данные:")
+                        cols = st.columns(2)
+                        for i, tag in enumerate(tags):
+                            with cols[i % 2]:
+                                smm_inputs[tag] = st.text_input(f"Введите {tag}", key=f"smm_tag_{tag}")
+                    
+                    if st.button("🪄 Сгенерировать текст афиши"):
+                        gen_text = template_content
+                        for tag, val in smm_inputs.items():
+                            gen_text = gen_text.replace(f"{{{tag}}}", val)
+                        st.session_state['generated_smm_text'] = gen_text
+                        st.rerun() # Принудительно обновляем страницу, чтобы текст появился в поле
+                    
+                    smm_text = st.text_area("Текст афиши (на основе шаблона)", 
+                                           value=st.session_state.get('generated_smm_text', ""),
+                                           height=150, key="smm_text_afisha_area")
+                    smm_uploaded_file = st.file_uploader("Прикрепите фото афиши", type=['png', 'jpg', 'jpeg'], key="smm_photo_afisha")
+                else:
+                    st.warning("Нет доступных шаблонов.")
+                    smm_text = ""
+                    smm_uploaded_file = None
+
+            col_date, col_hour, col_min, col_btn = st.columns([1.5, 1, 1, 1.5])
+            with col_date:
+                d = st.date_input("Дата", datetime.now())
+            with col_hour:
+                h = st.selectbox("Час", range(24), index=datetime.now().hour)
+            with col_min:
+                m = st.selectbox("Мин", range(0, 60, 5), index=0)
+                
+            scheduled_at = datetime.combine(d, datetime.min.time()).replace(hour=h, minute=m)
+            
+            with col_btn:
+                st.write(" ")
+                st.write(" ")
+                if st.button("В очередь"):
+                    if smm_text:
+                        smm_photo = None
+                        if smm_uploaded_file:
+                            try:
+                                from parser.vk_parser import upload_photo
+                                import vk_api
+                                vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
+                                smm_photo = upload_photo(vk, smm_uploaded_file)
+                            except Exception as e:
+                                st.error(f"Ошибка загрузки фото: {e}")
+                        
+                        from database.db import add_to_queue
+                        add_to_queue(None, smm_text, priority=5, er=0.0, scheduled_at=scheduled_at, attachments=smm_photo)
+                        
+                        # СММ посты сразу получают статус 'ready', им не нужно одобрение редактора
+                        conn = get_connection(); cur = conn.cursor()
+                        cur.execute("UPDATE post_queue SET status = 'ready', author_role = 'smm' WHERE suggested_text = %s ORDER BY created_at DESC LIMIT 1", (smm_text,))
+                        conn.commit(); cur.close(); conn.close()
+                        
+                        st.success(f"Запланировано на {scheduled_at.strftime('%d.%m %H:%M')}")
+                    else:
+                        st.error("Текст пуст!")
+
+        elif role == "Редактор":
+            st.header("🛠 Управление контентом (Редактор)")
+            
+            # 1. Создание шаблонов
+            st.subheader("📝 Создание шаблонов")
+            t_name = st.text_input("Название шаблона")
+            t_cont = st.text_area("Структура шаблона ({теги})", placeholder="Заголовок: {title}\n...")
+            if st.button("Сохранить шаблон"):
+                from database.db import add_template
+                add_template(t_name, t_cont)
+                st.success("Шаблон добавлен!")
+
+            st.divider()
+            
+            # 2. Проверка постов волонтеров
+            st.subheader("⚖️ Проверка предложенных постов")
+            conn = get_connection()
+            to_edit = pd.read_sql("SELECT * FROM post_queue WHERE status = 'editing' OR (author_role='volunteer' AND status='pending')", conn)
+            conn.close()
+            
+            if not to_edit.empty:
+                post_to_fix = st.selectbox("Выберите пост для проверки", to_edit['id'])
+                current_row = to_edit[to_edit['id'] == post_to_fix].iloc[0]
+                
+                st.info(f"Текст волонтера:\n{current_row['suggested_text']}")
+                if current_row['attachments']:
+                    st.write(f"Вложение: {current_row['attachments']}")
+                    # Если это локальный путь, показываем напрямую
+                    if os.path.exists(str(current_row['attachments'])):
+                        st.image(current_row['attachments'], caption="Предпросмотр (локально)", width=400)
+                    else:
+                        try:
+                            from parser.vk_parser import get_photo_url
+                            import vk_api
+                            vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
+                            img_url = get_photo_url(vk, current_row['attachments'])
+                            if img_url:
+                                st.image(img_url, caption="Прикрепленное фото", width=400)
+                            else:
+                                vk_link = f"https://vk.com/{current_row['attachments']}"
+                                st.warning("Не удалось загрузить предпросмотр. Посмотрите фото по ссылке:")
+                                st.link_button("🔗 Открыть фото в VK", vk_link)
+                        except Exception as e:
+                            st.warning(f"Не удалось загрузить предпросмотр фото: {e}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ Одобрить (в очередь)"):
+                        conn = get_connection(); cur = conn.cursor()
+                        cur.execute("UPDATE post_queue SET status = 'ready', priority = 3 WHERE id = %s", (post_to_fix,))
+                        conn.commit(); cur.close(); conn.close()
+                        st.success("Пост одобрен!"); st.rerun()
+                with col2:
+                    if st.button("❌ Отклонить (удалить)"):
+                        conn = get_connection(); cur = conn.cursor()
+                        cur.execute("DELETE FROM post_queue WHERE id = %s", (post_to_fix,))
+                        conn.commit(); cur.close(); conn.close()
+                        st.warning("Пост удален!"); st.rerun()
+            else:
+                st.write("Нет постов на проверку.")
+        elif role == "Волонтер":
+            st.header("✍️ Предложение поста (Волонтер)")
+            from database.db import get_templates
+            templates = get_templates()
+            
+            if templates:
+                t_names = [t['name'] for t in templates]
+                sel_t = st.selectbox("Выберите тип поста", t_names)
+                template_obj = next(t for t in templates if t['name'] == sel_t)
+                template_content = template_obj['content']
+                
+                st.info(f"📋 **Структура шаблона:**\n\n{template_content}")
+                
+                # Динамическая генерация полей на основе тегов в фигурных скобках
+                import re
+                tags = re.findall(r"\{(.*?)\}", template_content)
+                
+                inputs = {}
+                if tags:
+                    st.subheader("Заполните данные для автогенерации:")
+                    cols = st.columns(2)
+                    for i, tag in enumerate(tags):
+                        with cols[i % 2]:
+                            inputs[tag] = st.text_input(f"Введите {tag}", key=f"tag_{tag}")
+                
+                # Кнопка генерации
+                if st.button("🪄 Сгенерировать текст"):
+                    generated_text = template_content
+                    for tag, val in inputs.items():
+                        generated_text = generated_text.replace(f"{{{tag}}}", val)
+                    st.session_state['generated_vol_text'] = generated_text
+                    st.rerun()
+
+                final_text = st.text_area("Итоговый текст (можно подправить)", 
+                                         value=st.session_state.get('generated_vol_text', ""), 
+                                         height=200, key="vol_text_area_final")                
+                uploaded_file = st.file_uploader("Прикрепите фото", type=['png', 'jpg', 'jpeg'])
+                
+                if st.button("Отправить на проверку"):
+                    if final_text:
+                        attachments = None
+                        if uploaded_file:
+                            # Сохраняем локально для предпросмотра
+                            import os
+                            if not os.path.exists("uploads"): os.makedirs("uploads")
+                            file_path = os.path.join("uploads", f"{int(time.time())}_{uploaded_file.name}")
+                            with open(file_path, "wb") as f:
+                                f.write(uploaded_file.getbuffer())
+                            attachments = file_path # Сохраняем путь к локальному файлу
+                        
+                        from database.db import add_to_queue
+                        add_to_queue(None, final_text, priority=2, er=0.0, attachments=attachments)
+                        
+                        conn = get_connection(); cur = conn.cursor()
+                        cur.execute("UPDATE post_queue SET status = 'editing' WHERE suggested_text = %s ORDER BY created_at DESC LIMIT 1", (final_text,))
+                        conn.commit(); cur.close(); conn.close()
+                        st.success("Пост и фото отправлены редактору!")
+                        if 'generated_vol_text' in st.session_state:
+                            del st.session_state['generated_vol_text']
+                        st.rerun()
+                    else:
+                        st.error("Введите текст!")
+            else:
+                st.warning("Редактор еще не создал шаблоны.")
+
+    st.markdown("---")
+    # Кнопка публикации только для СММ и Руководителя
+    if role in ["СММ-специалист", "Руководитель"]:
+        if st.button("🚀 Опубликовать следующий по приоритету"):
+            publish_next_post()
+            st.rerun()
+
+with tab_q:
+    st.header("📅 План публикаций")
+    
+    conn = get_connection()
+    queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority FROM post_queue", conn)
+    conn.close()
+
+    # 1. Календарь только для СММ и Руководителя
+    if role in ["СММ-специалист", "Руководитель"]:
+        st.subheader("Визуальный календарь")
+        daily_counts = queue_data.copy()
+        daily_counts['date'] = pd.to_datetime(daily_counts['scheduled_at']).dt.date
+        daily_counts['date'] = daily_counts['date'].fillna(datetime.now().date())
+        
+        counts = daily_counts.groupby(['date', 'status']).size().reset_index(name='count')
+        
+        calendar_events = []
+        status_map = {'pending': 'Черновик', 'editing': 'На проверке', 'ready': 'Запланирован', 'posted': 'Опубликован'}
+        color_map = {'pending': '#ff9f89', 'editing': '#f39c12', 'ready': '#28a745', 'posted': '#3788d8'}
+
+        for _, row in counts.iterrows():
+            st_label = status_map.get(row['status'], row['status'])
+            calendar_events.append({
+                "title": f"{st_label}: {row['count']}",
+                "start": row['date'].isoformat(),
+                "end": row['date'].isoformat(),
+                "color": color_map.get(row['status'], "#cccccc"),
+                "allDay": True
+            })
+        
+        if calendar_events:
+            calendar(events=calendar_events, options={"initialView": "dayGridMonth"}, key="main_calendar")
+        else:
+            st.info("В календаре пока нет событий.")
+        st.divider()
+
+    # 2. Таблица для всех (или только для Волонтера и Редактора, если нужно)
+    st.subheader("📋 Список очереди")
+    if not queue_data.empty:
+        st.dataframe(queue_data, width='stretch')
+    else:
+        st.write("Очередь пуста.")
+
+with tab_a:
+    st.header("Архив постов из VK")
+    conn = get_connection()
+    archive_df = pd.read_sql("SELECT date, text, likes, views, er FROM (SELECT *, (likes+reposts+comments)/NULLIF(views,0)*100 as er FROM posts) t ORDER BY date DESC LIMIT 50", conn)
+    conn.close()
+    st.dataframe(archive_df, width='stretch')
+
+st.markdown("---")
+st.caption("HacatonProTechno - Система автоматизации работы волонтеров")
