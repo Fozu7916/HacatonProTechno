@@ -22,7 +22,7 @@ def init_db():
     # Таблица постов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS posts (
-            id            INT PRIMARY KEY,
+            id            BIGINT PRIMARY KEY,
             owner_id      BIGINT NOT NULL,
             date          DATETIME NOT NULL,
             text          TEXT,
@@ -34,12 +34,11 @@ def init_db():
             fetched_at    DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-
     # Таблица комментариев
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS post_comments (
-            id          INT PRIMARY KEY,
-            post_id     INT NOT NULL,
+            id          BIGINT PRIMARY KEY,
+            post_id     BIGINT NOT NULL,
             from_id     BIGINT NOT NULL,
             date        DATETIME NOT NULL,
             text        TEXT,
@@ -47,7 +46,6 @@ def init_db():
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     """)
-
     # Таблица очереди
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS post_queue (
@@ -174,6 +172,8 @@ def upsert_post(post: dict):
     from datetime import datetime
     conn = get_connection()
     cursor = conn.cursor()
+    # Составляем полный ID поста: owner_id_post_id
+    full_post_id = int(str(post["owner_id"]).replace("-", "") + str(post["id"]).zfill(10))
     cursor.execute("""
         INSERT INTO posts (id, owner_id, date, text, likes, reposts, views, comments, attachments)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -181,7 +181,7 @@ def upsert_post(post: dict):
             text = VALUES(text), likes = VALUES(likes), reposts = VALUES(reposts),
             views = VALUES(views), comments = VALUES(comments), attachments = VALUES(attachments)
     """, (
-        post["id"], post["owner_id"], datetime.fromtimestamp(post["date"]),
+        full_post_id, post["owner_id"], datetime.fromtimestamp(post["date"]),
         post.get("text", ""), post.get("likes", {}).get("count", 0),
         post.get("reposts", {}).get("count", 0), post.get("views", {}).get("count", 0),
         post.get("comments", {}).get("count", 0),
@@ -190,24 +190,24 @@ def upsert_post(post: dict):
     conn.commit()
     cursor.close()
     conn.close()
-
 def upsert_comment(comment: dict, post_id: int):
     from datetime import datetime
     conn = get_connection()
     cursor = conn.cursor()
+    # Составляем полный ID комментария: post_id_comment_id
+    full_comment_id = int(str(post_id) + str(comment["id"]).zfill(10))
     cursor.execute("""
         INSERT INTO post_comments (id, post_id, from_id, date, text, likes)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE text = VALUES(text), likes = VALUES(likes)
     """, (
-        comment["id"], post_id, comment["from_id"],
+        full_comment_id, post_id, comment["from_id"],
         datetime.fromtimestamp(comment["date"]), comment.get("text", ""),
         comment.get("likes", {}).get("count", 0),
     ))
     conn.commit()
     cursor.close()
     conn.close()
-
 def add_to_queue(
     post_id: int,
     text: str,

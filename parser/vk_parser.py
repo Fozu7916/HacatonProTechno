@@ -166,7 +166,7 @@ def parse_all_posts(n: int = None) -> list[dict]:
         if len(posts) < to_fetch:
             break
 
-        offset += batch
+        offset += len(posts)
         time.sleep(0.34)
 
     return result
