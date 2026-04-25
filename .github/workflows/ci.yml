@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: |
+          python -m py_compile app.py
+          python -m py_compile analytics/stats.py
+          python -m py_compile publisher/scheduler.py
+          python -m py_compile parser/vk_parser.py
+          python -m py_compile database/db.py
+
+      - name: Import smoke check
+        run: |
+          python -c "import app; print('app import OK')"

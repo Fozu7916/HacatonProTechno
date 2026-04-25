@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import time
 import requests
+import io
 from datetime import datetime
 from streamlit_calendar import calendar
 from custom_calendar import queue_calendar_popup_component
@@ -90,6 +91,80 @@ def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редакто
 
     raise ValueError(f"Не удалось сгенерировать текст через ИИ: {last_error}")
 
+
+def build_excel_report(report_data: dict) -> bytes:
+    """Собирает Excel-отчет по данным аналитики."""
+    output = io.BytesIO()
+    chart_df = report_data.get("chart_data")
+    daily_df = report_data.get("daily_stats")
+    top3_df = pd.DataFrame(report_data.get("top_3", []))
+    stats_df = pd.DataFrame(
+        [{"Показатель": k, "Значение": v} for k, v in report_data.get("stats", {}).items()]
+    )
+
+    try:
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            stats_df.to_excel(writer, index=False, sheet_name="KPI")
+            rows = 0
+            if isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
+                chart_df.reset_index().to_excel(writer, index=False, sheet_name="Динамика")
+            if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                daily_df.reset_index().to_excel(writer, index=False, sheet_name="По дням")
+            if not top3_df.empty:
+                top3_df.to_excel(writer, index=False, sheet_name="Топ посты")
+            # Лист с графиками и сводкой (как в дашборде)
+            workbook = writer.book
+            ws = workbook.add_worksheet("Графики")
+            writer.sheets["Графики"] = ws
+            ws.write("A1", "Дашборд графики")
+
+            if isinstance(chart_df, pd.DataFrame) and not chart_df.empty:
+                dyn = chart_df.reset_index().copy()
+                dyn["date"] = dyn["date"].astype(str)
+                dyn.to_excel(writer, index=False, sheet_name="Графики", startrow=2, startcol=0)
+                rows = len(dyn)
+                line_chart = workbook.add_chart({"type": "line"})
+                line_chart.add_series({
+                    "name": "Просмотры",
+                    "categories": ["Графики", 3, 0, rows + 2, 0],
+                    "values": ["Графики", 3, 1, rows + 2, 1],
+                })
+                line_chart.add_series({
+                    "name": "Лайки",
+                    "categories": ["Графики", 3, 0, rows + 2, 0],
+                    "values": ["Графики", 3, 2, rows + 2, 2],
+                })
+                line_chart.set_title({"name": "Динамика охвата и лайков"})
+                line_chart.set_legend({"position": "bottom"})
+                ws.insert_chart("E3", line_chart, {"x_scale": 1.4, "y_scale": 1.3})
+
+            if isinstance(daily_df, pd.DataFrame) and not daily_df.empty:
+                summary = {
+                    "Показатель": ["Просмотры", "Лайки", "Репосты", "Комментарии"],
+                    "Значение": [
+                        int(daily_df["views"].sum()),
+                        int(daily_df["likes"].sum()),
+                        int(daily_df["reposts"].sum()),
+                        int(daily_df["comments"].sum()),
+                    ],
+                }
+                s_df = pd.DataFrame(summary)
+                s_df.to_excel(writer, index=False, sheet_name="Графики", startrow=rows + 6 if isinstance(chart_df, pd.DataFrame) and not chart_df.empty else 2, startcol=0)
+                s_start = (rows + 7) if isinstance(chart_df, pd.DataFrame) and not chart_df.empty else 3
+                s_end = s_start + len(s_df) - 1
+                bar_chart = workbook.add_chart({"type": "column"})
+                bar_chart.add_series({
+                    "name": "Суммарные метрики",
+                    "categories": ["Графики", s_start, 0, s_end, 0],
+                    "values": ["Графики", s_start, 1, s_end, 1],
+                })
+                bar_chart.set_title({"name": "Суммарные метрики за период"})
+                ws.insert_chart("E22", bar_chart, {"x_scale": 1.2, "y_scale": 1.2})
+    except Exception as e:
+        raise ValueError(f"Ошибка генерации Excel: {e}")
+
+    return output.getvalue()
+
 # Инициализация БД при первом запуске
 if st.sidebar.button("Инициализировать БД"):
     from database.db import init_db
@@ -134,42 +209,78 @@ if role == "Руководитель":
     if 'active_report' in st.session_state and st.session_state['active_report']:
         report_data = st.session_state['active_report']
         with st.expander("📋 Расширенный отчет для руководства", expanded=True):
-            # 1. Метрики
             report = report_data["stats"]
-            col1, col2 = st.columns(2)
-            for i, (k, v) in enumerate(report.items()):
-                if i % 2 == 0: col1.metric(k, v)
-                else: col2.metric(k, v)
-            
-            # 2. Визуализация
-            st.subheader("📈 Динамика охвата и лайков")
-            st.line_chart(report_data["chart_data"])
 
-            # 2.1 Подробная таблица для руководства
-            st.subheader("📅 Ежедневная статистика")
+            st.markdown("### 📌 KPI дашборд")
+            kpi_cols = st.columns(4)
+            kpi_cols[0].metric("Период", f"{report.get('Период (дней)', '-') } дн.")
+            kpi_cols[1].metric("Постов", report.get("Всего постов", "-"))
+            kpi_cols[2].metric("Охват", report.get("Всего охвата", "-"))
+            kpi_cols[3].metric("ER (%)", report.get("Средний ER (%)", "-"))
+
+            info_cols = st.columns(3)
+            info_cols[0].info(f"🕐 Лучшие часы: {report.get('Лучшие часы', '-')}")
+            info_cols[1].success(f"📅 Лучший день: {report.get('Лучший день недели', '-')}")
+            info_cols[2].warning(f"🏷 Темы: {report.get('Ключевые темы', '-')}")
+
+            st.markdown("### 📈 Динамика")
+            chart_cols = st.columns(2)
+            with chart_cols[0]:
+                st.caption("Охват и лайки по датам")
+                st.line_chart(report_data["chart_data"], use_container_width=True)
+            with chart_cols[1]:
+                st.caption("Суммарные метрики за период")
+                summary_df = pd.DataFrame(
+                    {
+                        "Показатель": ["Просмотры", "Лайки", "Репосты", "Комментарии"],
+                        "Значение": [
+                            int(report_data["daily_stats"]["views"].sum()),
+                            int(report_data["daily_stats"]["likes"].sum()),
+                            int(report_data["daily_stats"]["reposts"].sum()),
+                            int(report_data["daily_stats"]["comments"].sum()),
+                        ],
+                    }
+                )
+                st.bar_chart(summary_df.set_index("Показатель"), use_container_width=True)
+
+            st.markdown("### 📅 Ежедневная статистика")
             st.dataframe(report_data["daily_stats"], use_container_width=True)
 
-            # 3. Топ-3 поста
+            st.markdown("### 🏆 Топ-3 лучших поста")
             st.subheader("🏆 Топ-3 лучших поста за период")
             for post in report_data["top_3"]:
                 st.markdown(f"**Просмотры: {post['views']} | Лайки: {post['likes']}**")
                 st.caption(post['text'])
                 st.link_button("Открыть пост", post['link'])
                 st.divider()
-            
-            # 4. Кнопка скачивания PDF
+
+            export_col1, export_col2 = st.columns(2)
             from analytics.stats import generate_pdf_report
             try:
                 pdf_output = generate_pdf_report(report_data, chart_df=report_data["chart_data"])
                 pdf_bytes = bytes(pdf_output)
-                st.download_button(
-                    label="📥 Скачать отчет в PDF",
-                    data=pdf_bytes,
-                    file_name=f"report.pdf",
-                    mime="application/pdf"
-                )
+                with export_col1:
+                    st.download_button(
+                        label="📥 Скачать отчет в PDF",
+                        data=pdf_bytes,
+                        file_name="report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
             except Exception as e:
                 st.error(f"Ошибка генерации PDF: {e}")
+            try:
+                excel_bytes = build_excel_report(report_data)
+                with export_col2:
+                    st.download_button(
+                        label="📊 Скачать отчет в Excel",
+                        data=excel_bytes,
+                        file_name="report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+            except Exception as e:
+                st.error(f"Ошибка генерации Excel: {e}")
 st.sidebar.header("📊 Статистика")
 stats, _ = get_dry_stats(limit=stat_limit)
 if stats:
@@ -460,10 +571,15 @@ if role != "Руководитель":
             st.rerun()
 
 with tab_q:
-    st.header("📅 План публикаций")
+    if role in ["СММ-специалист", "Руководитель"]:
+        st.header("📅 План публикаций")
+        st.markdown(f"## {datetime.now().strftime('%B %Y').capitalize()}")
+    else:
+        st.header("📋 Очередь постов")
     
     conn = get_connection()
     queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority FROM post_queue", conn)
+    vk_posted_data = pd.read_sql("SELECT id, date, text FROM posts ORDER BY date DESC LIMIT 300", conn)
     conn.close()
     if not queue_data.empty:
         queue_data["scheduled_at"] = pd.to_datetime(queue_data["scheduled_at"], errors="coerce")
@@ -485,9 +601,27 @@ with tab_q:
                         "status": row["status"] or "pending",
                     }
                 )
+        if not vk_posted_data.empty:
+            p = vk_posted_data.where(pd.notnull(vk_posted_data), None)
+            for _, row in p.iterrows():
+                dt = row["date"]
+                dt_iso = pd.to_datetime(dt, errors="coerce")
+                dt_iso = dt_iso.isoformat() if dt is not None and pd.notna(dt_iso) else None
+                posts_payload.append(
+                    {
+                        # Отрицательный ID = архивный пост из VK (read-only в попапе)
+                        "id": -int(row["id"]),
+                        "suggested_text": row["text"] or "",
+                        "scheduled_at": dt_iso,
+                        "status": "posted",
+                    }
+                )
         action = queue_calendar_popup_component(posts_payload, key="queue_calendar_popup_main")
         if action and isinstance(action, dict):
             if action.get("action") == "save":
+                if int(action.get("post_id")) < 0:
+                    st.info("Архивный пост из VK доступен только для просмотра.")
+                    st.rerun()
                 conn = get_connection(); cur = conn.cursor()
                 cur.execute(
                     "UPDATE post_queue SET suggested_text = %s, status = %s WHERE id = %s",
@@ -497,6 +631,23 @@ with tab_q:
                 st.success(f"Пост #{action.get('post_id')} обновлен")
                 st.rerun()
             elif action.get("action") == "delete":
+                if int(action.get("post_id")) < 0:
+                    try:
+                        import vk_api
+                        group_id = os.getenv("GROUP_ID", "").strip().replace("-", "")
+                        if not group_id:
+                            st.error("Не задан GROUP_ID в .env")
+                            st.rerun()
+                        vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
+                        vk_post_id = abs(int(action.get("post_id")))
+                        vk.wall.delete(owner_id=-int(group_id), post_id=vk_post_id)
+                        conn = get_connection(); cur = conn.cursor()
+                        cur.execute("DELETE FROM posts WHERE id = %s", (vk_post_id,))
+                        conn.commit(); cur.close(); conn.close()
+                        st.success(f"Пост VK #{vk_post_id} удален")
+                    except Exception as e:
+                        st.error(f"Не удалось удалить пост в VK: {e}")
+                    st.rerun()
                 conn = get_connection(); cur = conn.cursor()
                 cur.execute("DELETE FROM post_queue WHERE id = %s", (int(action.get("post_id")),))
                 conn.commit(); cur.close(); conn.close()

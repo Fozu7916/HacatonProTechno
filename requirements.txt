@@ -6,3 +6,4 @@ pandas
 fpdf2
 matplotlib
 streamlit-calendar
+xlsxwriter

@@ -135,7 +135,9 @@ def generate_pdf_report(report_data, chart_df=None):
     import io
     
     pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    epw = pdf.w - pdf.l_margin - pdf.r_margin
     
     # Шрифты
     possible_fonts = ["C:/Windows/Fonts/times.ttf", "C:/Windows/Fonts/arial.ttf"]
@@ -148,17 +150,18 @@ def generate_pdf_report(report_data, chart_df=None):
             except: continue
     if not font_loaded: pdf.set_font('helvetica', '', 16)
 
-    pdf.cell(200, 10, txt="Community Efficiency Report (VK)", ln=True, align='C')
+    pdf.cell(epw, 10, txt="Community Efficiency Report (VK)", ln=True, align='C')
     pdf.ln(5)
     
     if font_loaded: pdf.set_font('CustomFont', '', 11)
     else: pdf.set_font('helvetica', '', 11)
 
-    # Основные метрики
+    # 1) KPI + инсайты (как в дашборде)
     for key, value in report_data['stats'].items():
-        pdf.cell(200, 8, txt=f"{key}: {value}", ln=True)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(epw, 7, txt=f"{key}: {value}")
     
-    # График
+    # 2) График динамики (как в дашборде)
     if chart_df is not None and not chart_df.empty:
         pdf.ln(5)
         plt.figure(figsize=(10, 4))
@@ -171,30 +174,85 @@ def generate_pdf_report(report_data, chart_df=None):
         img_buf = io.BytesIO()
         plt.savefig(img_buf, format='png', dpi=150)
         img_buf.seek(0)
-        pdf.image(img_buf, x=10, y=pdf.get_y(), w=190)
+        img_w = min(epw, 190)
+        pdf.image(img_buf, x=pdf.l_margin, y=pdf.get_y(), w=img_w)
         plt.close()
         pdf.ln(75) # Делаем большой отступ после графика, чтобы текст не накладывался
 
-    # Таблица подробной статистики
+    # 3) Суммарные метрики (bar chart, как в дашборде)
+    daily_stats = report_data.get('daily_stats')
+    if daily_stats is not None and not daily_stats.empty:
+        summary_values = {
+            "Views": int(daily_stats['views'].sum()),
+            "Likes": int(daily_stats['likes'].sum()),
+            "Reposts": int(daily_stats['reposts'].sum()),
+            "Comments": int(daily_stats['comments'].sum()),
+        }
+        plt.figure(figsize=(8, 3.5))
+        plt.bar(list(summary_values.keys()), list(summary_values.values()), color=["#2563eb", "#ef4444", "#22c55e", "#f59e0b"])
+        plt.grid(axis='y', alpha=0.25)
+        plt.tight_layout()
+        img_buf2 = io.BytesIO()
+        plt.savefig(img_buf2, format='png', dpi=150)
+        img_buf2.seek(0)
+        if pdf.get_y() > 190:
+            pdf.add_page()
+        pdf.image(img_buf2, x=pdf.l_margin, y=pdf.get_y(), w=min(epw, 170))
+        plt.close()
+        pdf.ln(65)
+
+    # 4) Таблица подробной статистики
     pdf.set_font('CustomFont', '', 12) if font_loaded else pdf.set_font('helvetica', '', 12)
-    pdf.cell(200, 10, txt="Подробная статистика по дням:", ln=True)
+    pdf.cell(epw, 10, txt="Подробная статистика по дням:", ln=True)
     pdf.set_font('CustomFont', '', 9) if font_loaded else pdf.set_font('helvetica', '', 9)
     
     # Заголовки таблицы
-    pdf.cell(40, 8, "Дата", 1); pdf.cell(40, 8, "Просмотры", 1); pdf.cell(40, 8, "Лайки", 1); pdf.cell(40, 8, "Комменты", 1); pdf.ln()
+    c1, c2, c3, c4 = 50, 45, 40, 45
+    if c1 + c2 + c3 + c4 > epw:
+        scale = epw / (c1 + c2 + c3 + c4)
+        c1, c2, c3, c4 = c1 * scale, c2 * scale, c3 * scale, c4 * scale
+    pdf.cell(c1, 8, "Дата", 1)
+    pdf.cell(c2, 8, "Просмотры", 1)
+    pdf.cell(c3, 8, "Лайки", 1)
+    pdf.cell(c4, 8, "Комменты", 1)
+    pdf.ln()
     
     # Данные таблицы (последние 10 дней для компактности)
     daily = report_data['daily_stats'].head(10)
     for date, row in daily.iterrows():
-        pdf.cell(40, 7, str(date), 1)
-        pdf.cell(40, 7, str(int(row['views'])), 1)
-        pdf.cell(40, 7, str(int(row['likes'])), 1)
-        pdf.cell(40, 7, str(int(row['comments'])), 1)
+        pdf.cell(c1, 7, str(date), 1)
+        pdf.cell(c2, 7, str(int(row['views'])), 1)
+        pdf.cell(c3, 7, str(int(row['likes'])), 1)
+        pdf.cell(c4, 7, str(int(row['comments'])), 1)
         pdf.ln()
+
+    # 5) Топ-3 поста (как в дашборде)
+    top_3 = report_data.get('top_3', [])
+    if top_3:
+        if pdf.get_y() > 215:
+            pdf.add_page()
+        pdf.ln(4)
+        pdf.set_font('CustomFont', '', 12) if font_loaded else pdf.set_font('helvetica', '', 12)
+        pdf.cell(epw, 10, txt="Топ-3 лучших поста:", ln=True)
+        pdf.set_font('CustomFont', '', 10) if font_loaded else pdf.set_font('helvetica', '', 10)
+        for i, post in enumerate(top_3, start=1):
+            line = f"{i}) Views: {post.get('views', 0)} | Likes: {post.get('likes', 0)}"
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 7, txt=line)
+            txt = str(post.get('text', 'Без текста'))
+            if len(txt) > 180:
+                txt = txt[:180] + "..."
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(0, 6, txt=f"Текст: {txt}")
+            link = str(post.get('link', ''))
+            if link:
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 6, txt=f"Ссылка: {link}")
+            pdf.ln(2)
 
     pdf.ln(10)
     pdf.set_font('helvetica', '', 8)
-    pdf.cell(200, 10, txt=f"Generated: {datetime.now().strftime('%d.%m.%Y %H:%M')}", ln=True, align='R')
+    pdf.cell(epw, 10, txt=f"Generated: {datetime.now().strftime('%d.%m.%Y %H:%M')}", ln=True, align='R')
     
     return pdf.output()
 

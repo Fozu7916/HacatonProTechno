@@ -1,24 +1,108 @@
-# VK Community Parser (HacatonProTechno)
+# HacatonProTechno — Медиахаб для молодёжного центра
 
-Парсер постов и комментариев из сообществ VK с сохранением в MySQL.
+Платформа для команды молодёжного центра: контент-план, шаблоны, очереди публикаций, модерация, публикация в VK, аналитика и экспорт отчётов.
 
-## Установка
+## Что умеет MVP
 
-1. Установите зависимости:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Создайте базу данных MySQL:
-   ```sql
-   CREATE DATABASE vk_parser CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-   ```
+- Роли: `Волонтер`, `Редактор`, `СММ-специалист`, `Руководитель`.
+- Создание постов по шаблонам, ИИ-генерация текста, ручное редактирование.
+- Очередь постов и визуальный календарь по статусам.
+- Модерация постов редактором.
+- Публикация в VK из очереди.
+- Аналитика по постам и дашборд для руководителя.
+- Экспорт отчётов в `PDF` и `Excel`.
 
-### Собрать N последних постов
-Например, для получения последних 50 постов:
+## Стек
+
+- Python 3.11+
+- Streamlit
+- MySQL
+- VK API
+
+## Быстрый старт
+
+### 1) Установка зависимостей
+
 ```bash
-python parser/main.py --count 50
+pip install -r requirements.txt
 ```
- или
+
+### 2) Подготовка БД
+
+Создайте БД:
+
+```sql
+CREATE DATABASE vk_parser CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+### 3) Настройка `.env`
+
+Пример обязательных переменных:
+
+```env
+GROUP_ID=123456789
+
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=root
+DB_NAME=vk_parser
+
+# Для VK
+VK_SERVICE_TOKEN=...
+VK_USER_TOKEN=...
+
+# Для ИИ-генерации (OpenRouter / совместимый endpoint)
+OPENROUTER_API_KEY=...
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=deepseek/deepseek-chat-v3-0324:free
+```
+
+### 4) Запуск приложения
+
 ```bash
-python parser/main.py -c 50
+python -m streamlit run app.py
 ```
+
+## Основные сценарии
+
+- `СММ`: создаёт пост, ставит в очередь, публикует.
+- `Редактор`: проверяет и редактирует предложения волонтёров.
+- `Руководитель`: формирует отчёт, скачивает `PDF` и `Excel`.
+- `Волонтер`: отправляет текст/фото на модерацию.
+
+## Работа с данными VK
+
+- Кнопка `Обновить данные из VK` подтягивает новые посты в таблицу `posts`.
+- Публикация выполняется из очереди через `publisher/scheduler.py`.
+
+## CI/CD
+
+В репозиторий добавлены GitHub Actions:
+
+- `CI` (`.github/workflows/ci.yml`)
+  - запуск на `push` и `pull_request`;
+  - установка зависимостей;
+  - проверка синтаксиса основных модулей;
+  - smoke-check импорта приложения.
+
+- `CD` (`.github/workflows/cd.yml`)
+  - запуск вручную (`workflow_dispatch`) или по тегу `v*`;
+  - сборка архивного bundle в `dist/`;
+  - загрузка артефакта в GitHub Actions.
+
+## Структура проекта
+
+```text
+analytics/                  # аналитика, отчёты, PDF
+database/                   # подключение и SQL-операции
+parser/                     # парсинг VK и загрузка медиа
+publisher/                  # публикация постов
+custom_calendar_component/  # кастомный календарь с popup
+app.py                      # основной Streamlit интерфейс
+```
+
+## Примечания
+
+- `.env` не должен попадать в git.
+- Для удаления/публикации в VK нужны корректные права у `VK_USER_TOKEN`.

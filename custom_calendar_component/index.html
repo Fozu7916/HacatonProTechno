@@ -157,16 +157,20 @@
           </div>
         `;
         for (const p of list) {
+          const isArchive = Number(p.id) < 0;
           html += `
             <div class="card" data-post-id="${p.id}">
-              <div><strong>#${p.id}</strong></div>
+              <div><strong>${isArchive ? `VK #${Math.abs(Number(p.id))}` : `#${p.id}`}</strong></div>
               <textarea id="text_${p.id}">${(p.suggested_text || "").replaceAll("<", "&lt;")}</textarea>
               <select id="status_${p.id}">
                 ${["pending","editing","ready","posted"].map(s => `<option value="${s}" ${p.status===s?"selected":""}>${STATUS_LABELS[s]}</option>`).join("")}
               </select>
               <div class="btn-row">
-                <button class="btn save" data-action="save" data-id="${p.id}">Сохранить</button>
-                <button class="btn del" data-action="delete" data-id="${p.id}">Удалить</button>
+                ${isArchive
+                  ? `<button class="btn del" data-action="delete" data-id="${p.id}">Удалить в VK</button>`
+                  : `<button class="btn save" data-action="save" data-id="${p.id}">Сохранить</button>
+                     <button class="btn del" data-action="delete" data-id="${p.id}">Удалить</button>`
+                }
               </div>
             </div>
           `;
@@ -235,7 +239,8 @@
       function renderCalendar() {
         const wrap = document.getElementById("calendarWrap");
         const labels = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-        const monthName = currentMonth.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
+        const monthRaw = currentMonth.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
+        const monthName = monthRaw.charAt(0).toUpperCase() + monthRaw.slice(1);
         const map = dayEventsMap();
         let html = `
           <div class="toolbar">
