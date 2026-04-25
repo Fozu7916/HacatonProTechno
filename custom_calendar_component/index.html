@@ -1,0 +1,315 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body { margin: 0; font-family: Inter, Arial, sans-serif; background: transparent; }
+      #calendarWrap { padding: 8px; }
+      .toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+      .monthTitle { font-weight: 700; font-size: 16px; }
+      .navBtn { border: 1px solid #d1d5db; background: #fff; border-radius: 6px; padding: 4px 8px; cursor: pointer; }
+      .grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+      .dow { font-size: 12px; opacity: 0.75; text-align: center; }
+      .dayCell {
+        min-height: 92px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 6px; background: #fff; position: relative;
+      }
+      .dayCell.muted { opacity: 0.45; }
+      .dayNum { font-size: 12px; margin-bottom: 6px; }
+      .badge {
+        font-size: 11px; border-radius: 999px; padding: 2px 8px; margin-bottom: 4px; display: inline-block; color: #fff; cursor: pointer;
+      }
+      .b-pending { background: #ff9f89; color: #111827; }
+      .b-editing { background: #f39c12; }
+      .b-ready { background: #28a745; }
+      .b-posted { background: #3788d8; }
+      #errorBox {
+        display: none;
+        margin: 8px;
+        padding: 10px;
+        border-radius: 8px;
+        background: #fee2e2;
+        color: #991b1b;
+        font-size: 13px;
+      }
+      .popup {
+        position: absolute;
+        z-index: 9999;
+        width: 360px;
+        max-height: 420px;
+        overflow: auto;
+        background: #111827;
+        color: #f3f4f6;
+        border-radius: 10px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+        padding: 10px;
+      }
+      .popup.light {
+        background: #ffffff;
+        color: #111827;
+        border: 1px solid #e5e7eb;
+      }
+      .popup-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+      .popup-title { font-weight: 700; font-size: 14px; }
+      .close-btn { background: transparent; border: none; color: inherit; cursor: pointer; font-size: 16px; }
+      .card { border: 1px solid rgba(148, 163, 184, 0.4); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+      .card textarea { width: 100%; min-height: 72px; border-radius: 6px; border: 1px solid #cbd5e1; padding: 6px; box-sizing: border-box; }
+      .card select { width: 100%; margin-top: 6px; padding: 6px; border-radius: 6px; border: 1px solid #cbd5e1; }
+      .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+      .btn { border: none; border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px; }
+      .save { background: #22c55e; color: #fff; }
+      .del { background: #ef4444; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="errorBox"></div>
+    <div id="calendarWrap"></div>
+    <div id="popup" class="popup" style="display:none;"></div>
+    <script>
+      function showError(msg) {
+        const box = document.getElementById("errorBox");
+        box.style.display = "block";
+        box.textContent = msg;
+      }
+
+      // Локальный мост Streamlit без внешней библиотеки (без CDN).
+      function sendMessageToStreamlitClient(type, data) {
+        const outData = Object.assign({ isStreamlitMessage: true, type }, data);
+        window.parent.postMessage(outData, "*");
+      }
+      function setComponentReady() {
+        sendMessageToStreamlitClient("streamlit:componentReady", { apiVersion: 1 });
+      }
+      function setFrameHeight(height) {
+        sendMessageToStreamlitClient("streamlit:setFrameHeight", { height });
+      }
+      function setComponentValue(value) {
+        sendMessageToStreamlitClient("streamlit:setComponentValue", { value });
+      }
+
+      const STATUS_LABELS = {
+        pending: "Черновик",
+        editing: "На проверке",
+        ready: "Запланирован",
+        posted: "Опубликован",
+      };
+      const STATUS_COLORS = {
+        pending: "#ff9f89",
+        editing: "#f39c12",
+        ready: "#28a745",
+        posted: "#3788d8",
+      };
+      let posts = [];
+      let currentMonth = new Date();
+      currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
+
+      function dateOnly(scheduledAt) {
+        if (!scheduledAt) return new Date().toISOString().slice(0, 10);
+        const d = new Date(scheduledAt);
+        if (Number.isNaN(d.getTime())) {
+          return new Date().toISOString().slice(0, 10);
+        }
+        return d.toISOString().slice(0, 10);
+      }
+
+      function aggregateEvents(rows) {
+        const map = new Map();
+        for (const p of rows) {
+          const d = dateOnly(p.scheduled_at);
+          const key = `${d}|${p.status}`;
+          map.set(key, (map.get(key) || 0) + 1);
+        }
+        const events = [];
+        for (const [key, count] of map.entries()) {
+          const [date, status] = key.split("|");
+          events.push({
+            title: `${STATUS_LABELS[status] || status}: ${count}`,
+            start: date,
+            allDay: true,
+            backgroundColor: STATUS_COLORS[status] || "#9ca3af",
+            borderColor: STATUS_COLORS[status] || "#9ca3af",
+            extendedProps: { status, date },
+          });
+        }
+        return events;
+      }
+
+      function sendValue(payload) {
+        setComponentValue(payload);
+      }
+
+      function closePopup() {
+        const popup = document.getElementById("popup");
+        popup.style.display = "none";
+        popup.innerHTML = "";
+      }
+
+      function buildPopupContent(day, status, anchorEl) {
+        const popup = document.getElementById("popup");
+        const isLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+        popup.className = isLight ? "popup light" : "popup";
+        const list = posts.filter((p) => dateOnly(p.scheduled_at) === day && p.status === status);
+        const label = STATUS_LABELS[status] || status;
+        let html = `
+          <div class="popup-head">
+            <div class="popup-title">${day} · ${label} (${list.length})</div>
+            <button class="close-btn" id="closePopup">✕</button>
+          </div>
+        `;
+        for (const p of list) {
+          html += `
+            <div class="card" data-post-id="${p.id}">
+              <div><strong>#${p.id}</strong></div>
+              <textarea id="text_${p.id}">${(p.suggested_text || "").replaceAll("<", "&lt;")}</textarea>
+              <select id="status_${p.id}">
+                ${["pending","editing","ready","posted"].map(s => `<option value="${s}" ${p.status===s?"selected":""}>${STATUS_LABELS[s]}</option>`).join("")}
+              </select>
+              <div class="btn-row">
+                <button class="btn save" data-action="save" data-id="${p.id}">Сохранить</button>
+                <button class="btn del" data-action="delete" data-id="${p.id}">Удалить</button>
+              </div>
+            </div>
+          `;
+        }
+        if (!list.length) {
+          html += `<div style="font-size:13px;opacity:0.8;">Постов нет</div>`;
+        }
+        popup.innerHTML = html;
+        popup.style.display = "block";
+
+        const rect = anchorEl.getBoundingClientRect();
+        let left = rect.left;
+        let top = rect.top - popup.offsetHeight - 8;
+        if (top < 8) top = rect.bottom + 8;
+        if (left + popup.offsetWidth > window.innerWidth - 8) left = window.innerWidth - popup.offsetWidth - 8;
+        popup.style.left = `${Math.max(8, left)}px`;
+        popup.style.top = `${Math.max(8, top)}px`;
+
+        document.getElementById("closePopup").onclick = closePopup;
+        popup.querySelectorAll("button[data-action]").forEach((btn) => {
+          btn.onclick = (e) => {
+            const postId = Number(e.target.getAttribute("data-id"));
+            const action = e.target.getAttribute("data-action");
+            if (action === "save") {
+              const text = document.getElementById(`text_${postId}`).value;
+              const newStatus = document.getElementById(`status_${postId}`).value;
+              // Мгновенно обновляем локальное состояние для UI в попапе/календаре.
+              posts = posts.map((p) =>
+                Number(p.id) === postId ? { ...p, suggested_text: text, status: newStatus } : p
+              );
+              closePopup();
+              renderCalendar();
+              setFrameHeight(document.body.scrollHeight + 20);
+              sendValue({ action: "save", post_id: postId, text, status: newStatus });
+            } else {
+              // Мгновенно убираем пост из локального состояния, чтобы визуал не "залипал".
+              posts = posts.filter((p) => Number(p.id) !== postId);
+              closePopup();
+              renderCalendar();
+              setFrameHeight(document.body.scrollHeight + 20);
+              sendValue({ action: "delete", post_id: postId });
+            }
+          };
+        });
+
+        sendValue({ action: "select", date: day, status });
+      }
+
+      function dayEventsMap() {
+        const map = {};
+        for (const p of posts) {
+          const day = dateOnly(p.scheduled_at);
+          map[day] = map[day] || { pending: 0, editing: 0, ready: 0, posted: 0 };
+          map[day][p.status] = (map[day][p.status] || 0) + 1;
+        }
+        return map;
+      }
+
+      function monthGridStart(d) {
+        const first = new Date(d.getFullYear(), d.getMonth(), 1);
+        const day = (first.getDay() + 6) % 7; // monday=0
+        first.setDate(first.getDate() - day);
+        return first;
+      }
+
+      function renderCalendar() {
+        const wrap = document.getElementById("calendarWrap");
+        const labels = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+        const monthName = currentMonth.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
+        const map = dayEventsMap();
+        let html = `
+          <div class="toolbar">
+            <button class="navBtn" id="prevMonth">◀</button>
+            <div class="monthTitle">${monthName}</div>
+            <button class="navBtn" id="nextMonth">▶</button>
+          </div>
+          <div class="grid">
+            ${labels.map((l) => `<div class="dow">${l}</div>`).join("")}
+        `;
+        const cursor = monthGridStart(currentMonth);
+        for (let i = 0; i < 42; i++) {
+          const day = new Date(cursor);
+          const dayStr = day.toISOString().slice(0, 10);
+          const isMuted = day.getMonth() !== currentMonth.getMonth();
+          const stats = map[dayStr] || { pending: 0, editing: 0, ready: 0, posted: 0 };
+          html += `<div class="dayCell ${isMuted ? "muted" : ""}" data-day="${dayStr}">
+            <div class="dayNum">${day.getDate()}</div>`;
+          for (const s of ["pending", "editing", "ready", "posted"]) {
+            if (stats[s] > 0) {
+              html += `<div class="badge b-${s}" data-day="${dayStr}" data-status="${s}">${STATUS_LABELS[s]}: ${stats[s]}</div>`;
+            }
+          }
+          html += `</div>`;
+          cursor.setDate(cursor.getDate() + 1);
+        }
+        html += "</div>";
+        wrap.innerHTML = html;
+
+        document.getElementById("prevMonth").onclick = () => {
+          currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1);
+          renderCalendar();
+          setFrameHeight(document.body.scrollHeight + 20);
+        };
+        document.getElementById("nextMonth").onclick = () => {
+          currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1);
+          renderCalendar();
+          setFrameHeight(document.body.scrollHeight + 20);
+        };
+        wrap.querySelectorAll(".badge").forEach((el) => {
+          el.onclick = (e) => {
+            const day = e.target.getAttribute("data-day");
+            const status = e.target.getAttribute("data-status");
+            buildPopupContent(day, status, e.target);
+          };
+        });
+      }
+
+      function onRender(event) {
+        const data = event.data || event.detail || {};
+        if (data.type !== "streamlit:render") return;
+        const args = data.args || {};
+        posts = args.posts || [];
+        renderCalendar();
+        setFrameHeight(document.body.scrollHeight + 20);
+      }
+
+      function bootstrap() {
+        try {
+          window.addEventListener("message", onRender);
+          setComponentReady();
+          setFrameHeight(700);
+          renderCalendar();
+          document.addEventListener("click", (e) => {
+            const popup = document.getElementById("popup");
+            if (popup.style.display === "block" && !popup.contains(e.target) && !e.target.closest(".badge")) {
+              closePopup();
+            }
+          });
+        } catch (e) {
+          showError(`Календарь не загрузился: ${e.message}`);
+        }
+      }
+      bootstrap();
+    </script>
+  </body>
+</html>

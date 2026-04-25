@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import os
 import time
+import requests
 from datetime import datetime
 from streamlit_calendar import calendar
+from custom_calendar import queue_calendar_popup_component
 from database.db import get_connection, init_db, get_setting, set_setting, add_template, get_templates, add_to_queue
 from analytics.stats import get_dry_stats
 from analytics.processor import process_incoming_post
@@ -11,6 +13,82 @@ from publisher.scheduler import publish_next_post
 st.set_page_config(page_title="VK Volunteer Panel", layout="wide")
 
 st.title("📱 Панель управления контентом")
+
+
+def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редактор") -> str:
+    """
+    Генерирует текст через OpenRouter/OpenAI-совместимый API.
+    Для работы нужен OPENROUTER_API_KEY или OPENAI_API_KEY в .env.
+    """
+    api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("Не найден API-ключ (OPENROUTER_API_KEY или OPENAI_API_KEY в .env)")
+
+    base_url = os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    model = os.getenv("LLM_MODEL", "deepseek/deepseek-chat-v3-0324:free")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    # Для OpenRouter полезно передавать origin приложения.
+    if "openrouter.ai" in base_url:
+        headers["HTTP-Referer"] = os.getenv("APP_URL", "http://localhost:8501")
+        headers["X-Title"] = os.getenv("APP_NAME", "HacatonProTechno")
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты опытный редактор соцсетей молодёжного центра. "
+                    "Пиши живо, структурно, без канцелярита, на русском языке."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Роль: {role_hint}\n"
+                    "Сгенерируй готовый пост для VK на основе данных ниже. "
+                    "Сохрани факты, добавь цепляющий заголовок, короткий призыв к действию и 3-6 хештегов.\n\n"
+                    f"{user_prompt}"
+                ),
+            },
+        ],
+        "temperature": 0.7,
+    }
+    endpoints = [f"{base_url.rstrip('/')}/chat/completions"]
+    # Fallback для случаев, когда в LLM_BASE_URL указан только домен.
+    if "/api/v1" not in base_url:
+        endpoints.append(f"{base_url.rstrip('/')}/api/v1/chat/completions")
+
+    # Fallback модели: у некоторых аккаунтов :free недоступен.
+    model_candidates = [model]
+    if model.endswith(":free"):
+        model_candidates.append(model.replace(":free", ""))
+    if "deepseek" in model:
+        model_candidates.append("deepseek/deepseek-chat")
+
+    last_error = None
+    for candidate_model in model_candidates:
+        payload["model"] = candidate_model
+        for url in endpoints:
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=45)
+                if response.ok:
+                    data = response.json()
+                    text = data["choices"][0]["message"]["content"].strip()
+                    if not text:
+                        raise ValueError("ИИ вернул пустой ответ")
+                    return text
+
+                err_text = response.text[:500]
+                last_error = f"{response.status_code} for {url}: {err_text}"
+            except requests.RequestException as e:
+                last_error = str(e)
+
+    raise ValueError(f"Не удалось сгенерировать текст через ИИ: {last_error}")
 
 # Инициализация БД при первом запуске
 if st.sidebar.button("Инициализировать БД"):
@@ -161,16 +239,33 @@ if role != "Руководитель":
                             with cols[i % 2]:
                                 smm_inputs[tag] = st.text_input(f"Введите {tag}", key=f"smm_tag_{tag}")
                     
-                    if st.button("🪄 Сгенерировать текст афиши"):
-                        gen_text = template_content
+                    if st.button("🤖 Сгенерировать ИИ-версию афиши"):
+                        draft_text = template_content
+                        ai_prompt = (
+                            f"Название шаблона: {sel_t}\n"
+                            f"Текст шаблона:\n{template_content}\n\n"
+                            "Заполненные поля:\n"
+                        )
                         for tag, val in smm_inputs.items():
-                            gen_text = gen_text.replace(f"{{{tag}}}", val)
-                        st.session_state['generated_smm_text'] = gen_text
-                        st.rerun() # Принудительно обновляем страницу, чтобы текст появился в поле
+                            draft_text = draft_text.replace(f"{{{tag}}}", val)
+                            ai_prompt += f"- {tag}: {val}\n"
+                        ai_prompt += f"\nЧерновик по шаблону:\n{draft_text}"
+                        try:
+                            ai_text = generate_text_with_ai(ai_prompt, role_hint="СММ-специалист")
+                            st.session_state['generated_smm_text'] = ai_text
+                            st.session_state['smm_text_afisha_area'] = ai_text
+                            st.success("ИИ-текст сгенерирован")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Ошибка ИИ-генерации: {e}")
                     
-                    smm_text = st.text_area("Текст афиши (на основе шаблона)", 
-                                           value=st.session_state.get('generated_smm_text', ""),
-                                           height=150, key="smm_text_afisha_area")
+                    if "smm_text_afisha_area" not in st.session_state:
+                        st.session_state["smm_text_afisha_area"] = st.session_state.get("generated_smm_text", "")
+                    smm_text = st.text_area(
+                        "Текст афиши (на основе шаблона)",
+                        height=150,
+                        key="smm_text_afisha_area"
+                    )
                     smm_uploaded_file = st.file_uploader("Прикрепите фото афиши", type=['png', 'jpg', 'jpeg'], key="smm_photo_afisha")
                 else:
                     st.warning("Нет доступных шаблонов.")
@@ -299,17 +394,33 @@ if role != "Руководитель":
                         with cols[i % 2]:
                             inputs[tag] = st.text_input(f"Введите {tag}", key=f"tag_{tag}")
                 
-                # Кнопка генерации
-                if st.button("🪄 Сгенерировать текст"):
-                    generated_text = template_content
+                if st.button("🤖 Сгенерировать текст ИИ"):
+                    draft_text = template_content
+                    ai_prompt = (
+                        f"Название шаблона: {sel_t}\n"
+                        f"Текст шаблона:\n{template_content}\n\n"
+                        "Заполненные поля:\n"
+                    )
                     for tag, val in inputs.items():
-                        generated_text = generated_text.replace(f"{{{tag}}}", val)
-                    st.session_state['generated_vol_text'] = generated_text
-                    st.rerun()
+                        draft_text = draft_text.replace(f"{{{tag}}}", val)
+                        ai_prompt += f"- {tag}: {val}\n"
+                    ai_prompt += f"\nЧерновик по шаблону:\n{draft_text}"
+                    try:
+                        ai_text = generate_text_with_ai(ai_prompt, role_hint="Волонтер")
+                        st.session_state['generated_vol_text'] = ai_text
+                        st.session_state['vol_text_area_final'] = ai_text
+                        st.success("ИИ-текст сгенерирован")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка ИИ-генерации: {e}")
 
-                final_text = st.text_area("Итоговый текст (можно подправить)", 
-                                         value=st.session_state.get('generated_vol_text', ""), 
-                                         height=200, key="vol_text_area_final")                
+                if "vol_text_area_final" not in st.session_state:
+                    st.session_state["vol_text_area_final"] = st.session_state.get("generated_vol_text", "")
+                final_text = st.text_area(
+                    "Итоговый текст (можно подправить)",
+                    height=200,
+                    key="vol_text_area_final"
+                )
                 uploaded_file = st.file_uploader("Прикрепите фото", type=['png', 'jpg', 'jpeg'])
                 
                 if st.button("Отправить на проверку"):
@@ -333,6 +444,8 @@ if role != "Руководитель":
                         st.success("Пост и фото отправлены редактору!")
                         if 'generated_vol_text' in st.session_state:
                             del st.session_state['generated_vol_text']
+                        if 'vol_text_area_final' in st.session_state:
+                            del st.session_state['vol_text_area_final']
                         st.rerun()
                     else:
                         st.error("Введите текст!")
@@ -352,37 +465,48 @@ with tab_q:
     conn = get_connection()
     queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority FROM post_queue", conn)
     conn.close()
+    if not queue_data.empty:
+        queue_data["scheduled_at"] = pd.to_datetime(queue_data["scheduled_at"], errors="coerce")
 
-    # 1. Календарь только для СММ и Руководителя
-    if role in ["СММ-специалист", "Руководитель"]:
-        st.subheader("Визуальный календарь")
-        daily_counts = queue_data.copy()
-        daily_counts['date'] = pd.to_datetime(daily_counts['scheduled_at']).dt.date
-        daily_counts['date'] = daily_counts['date'].fillna(datetime.now().date())
-        
-        counts = daily_counts.groupby(['date', 'status']).size().reset_index(name='count')
-        
-        calendar_events = []
-        status_map = {'pending': 'Черновик', 'editing': 'На проверке', 'ready': 'Запланирован', 'posted': 'Опубликован'}
-        color_map = {'pending': '#ff9f89', 'editing': '#f39c12', 'ready': '#28a745', 'posted': '#3788d8'}
-
-        for _, row in counts.iterrows():
-            st_label = status_map.get(row['status'], row['status'])
-            calendar_events.append({
-                "title": f"{st_label}: {row['count']}",
-                "start": row['date'].isoformat(),
-                "end": row['date'].isoformat(),
-                "color": color_map.get(row['status'], "#cccccc"),
-                "allDay": True
-            })
-        
-        if calendar_events:
-            calendar(events=calendar_events, options={"initialView": "dayGridMonth"}, key="main_calendar")
-        else:
-            st.info("В календаре пока нет событий.")
+    # 1. Кастомный календарь с popover над клеткой для редактора, СММ и руководителя
+    if role in ["Редактор", "СММ-специалист", "Руководитель"]:
+        st.subheader("Визуальный календарь (Popup)")
+        posts_payload = []
+        if not queue_data.empty:
+            q = queue_data.where(pd.notnull(queue_data), None)
+            for _, row in q.iterrows():
+                sched = row["scheduled_at"]
+                sched_iso = sched.isoformat() if sched is not None and pd.notna(sched) else None
+                posts_payload.append(
+                    {
+                        "id": int(row["id"]),
+                        "suggested_text": row["suggested_text"] or "",
+                        "scheduled_at": sched_iso,
+                        "status": row["status"] or "pending",
+                    }
+                )
+        action = queue_calendar_popup_component(posts_payload, key="queue_calendar_popup_main")
+        if action and isinstance(action, dict):
+            if action.get("action") == "save":
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute(
+                    "UPDATE post_queue SET suggested_text = %s, status = %s WHERE id = %s",
+                    (action.get("text", ""), action.get("status", "pending"), int(action.get("post_id"))),
+                )
+                conn.commit(); cur.close(); conn.close()
+                st.success(f"Пост #{action.get('post_id')} обновлен")
+                st.rerun()
+            elif action.get("action") == "delete":
+                conn = get_connection(); cur = conn.cursor()
+                cur.execute("DELETE FROM post_queue WHERE id = %s", (int(action.get("post_id")),))
+                conn.commit(); cur.close(); conn.close()
+                st.warning(f"Пост #{action.get('post_id')} удален")
+                st.rerun()
+            elif action.get("action") == "select":
+                st.caption(f"Выбрано: {action.get('date')} · {action.get('status')}")
         st.divider()
 
-    # 2. Таблица для всех (или только для Волонтера и Редактора, если нужно)
+    # 2. Таблица для всех
     st.subheader("📋 Список очереди")
     if not queue_data.empty:
         st.dataframe(queue_data, width='stretch')

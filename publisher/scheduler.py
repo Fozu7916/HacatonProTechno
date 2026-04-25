@@ -69,10 +69,10 @@ def publish_next_post():
             from_group=1
         )
         
-        # 3. Удаляем пост из очереди после успешной публикации
-        cursor.execute("DELETE FROM post_queue WHERE id = %s", (post['id'],))
+        # 3. Сохраняем пост в таблице со статусом 'posted' для отчетности
+        cursor.execute("UPDATE post_queue SET status = 'posted' WHERE id = %s", (post['id'],))
         conn.commit()
-        print(f"[Publisher] Пост ID {post['id']} опубликован и удален из очереди.")
+        print(f"[Publisher] Пост ID {post['id']} опубликован и помечен как posted.")
 
     except Exception as e:
         print(f"[Publisher] Ошибка при публикации: {e}")
