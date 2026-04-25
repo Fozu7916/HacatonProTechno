@@ -1,0 +1,96 @@
+import time
+import os
+import vk_api
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+
+VK_TOKEN = os.getenv("VK_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID")  # числовой ID группы (без минуса)
+
+
+def get_vk_session() -> vk_api.VkApi:
+    session = vk_api.VkApi(token=VK_TOKEN)
+    return session
+
+
+def fetch_posts(vk, count: int = 100, offset: int = 0) -> list[dict]:
+    """
+    Получает посты из сообщества.
+    count  — сколько постов за один запрос (макс. 100)
+    offset — смещение (для пагинации)
+    """
+    response = vk.wall.get(
+        owner_id=f"-{GROUP_ID}",
+        count=count,
+        offset=offset,
+        extended=0,
+    )
+    return response.get("items", [])
+
+
+def fetch_comments(vk, post_id: int, count: int = 100) -> list[dict]:
+    """Получает комментарии к посту."""
+    all_comments = []
+    offset = 0
+
+    while True:
+        response = vk.wall.getComments(
+            owner_id=f"-{GROUP_ID}",
+            post_id=post_id,
+            count=count,
+            offset=offset,
+            extended=0,
+            thread_items_count=0,
+        )
+        items = response.get("items", [])
+        all_comments.extend(items)
+
+        if len(items) < count:
+            break
+
+        offset += count
+        time.sleep(0.34)  # соблюдаем лимит VK API (3 запроса/сек)
+
+    return all_comments
+
+
+def parse_all_posts(n: int = None) -> list[dict]:
+    """
+    Парсит все (или последние n) постов сообщества вместе с комментариями.
+    Возвращает список словарей: {"post": ..., "comments": [...]}
+    """
+    session = get_vk_session()
+    vk = session.get_api()
+
+    result = []
+    offset = 0
+    batch = 100
+    fetched = 0
+
+    while True:
+        to_fetch = batch if n is None else min(batch, n - fetched)
+        posts = fetch_posts(vk, count=to_fetch, offset=offset)
+
+        if not posts:
+            break
+
+        for post in posts:
+            comments = []
+            if post.get("comments", {}).get("count", 0) > 0:
+                comments = fetch_comments(vk, post_id=post["id"])
+                time.sleep(0.34)
+
+            result.append({"post": post, "comments": comments})
+            fetched += 1
+
+            if n is not None and fetched >= n:
+                return result
+
+        if len(posts) < to_fetch:
+            break
+
+        offset += batch
+        time.sleep(0.34)
+
+    return result
