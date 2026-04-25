@@ -121,6 +121,7 @@ def init_db():
     """)
     cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('posts_per_day', '3')")
     cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('vk_user_token', '')")
+    cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('tgstat_api_token', '')")
 
     # Таблица пользователей
     cursor.execute("""
@@ -300,22 +301,77 @@ def get_telegram_stats(days: int = 30):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        # Метрики считаем раздельно:
+        # - imported: сообщения, подтянутые из Telegram (queue_id IS NULL)
+        # - sent: сообщения, отправленные нашей системой (queue_id IS NOT NULL)
+        # views в Bot API для каналов часто недоступны/0, поэтому "охват" может быть нулевым.
         cursor.execute(
             """
             SELECT
-                COUNT(*) AS total_posts,
-                COUNT(DISTINCT channel_id) AS channels_count
+                COUNT(DISTINCT CONCAT(channel_id, ':', message_id)) AS imported_messages,
+                COUNT(DISTINCT channel_id) AS imported_channels,
+                COALESCE(SUM(COALESCE(views,0)), 0) AS imported_views_sum,
+                COALESCE(AVG(COALESCE(views,0)), 0) AS imported_views_avg,
+                MAX(published_at) AS imported_last_at
             FROM telegram_posts
-            WHERE published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            WHERE queue_id IS NULL
+              AND message_id IS NOT NULL
+              AND published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
             """,
             (int(days),),
         )
-        row = cursor.fetchone() or {}
+        imported = cursor.fetchone() or {}
+
+        cursor.execute(
+            """
+            SELECT
+                COUNT(DISTINCT CONCAT(channel_id, ':', message_id)) AS sent_messages,
+                COUNT(DISTINCT channel_id) AS sent_channels,
+                MAX(published_at) AS sent_last_at
+            FROM telegram_posts
+            WHERE queue_id IS NOT NULL
+              AND message_id IS NOT NULL
+              AND published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            """,
+            (int(days),),
+        )
+        sent = cursor.fetchone() or {}
+
+        cursor.execute(
+            """
+            SELECT
+                COUNT(DISTINCT CONCAT(channel_id, ':', message_id)) AS total_messages,
+                COUNT(DISTINCT channel_id) AS total_channels,
+                MAX(published_at) AS last_published_at
+            FROM telegram_posts
+            WHERE message_id IS NOT NULL
+              AND published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            """,
+            (int(days),),
+        )
+        total = cursor.fetchone() or {}
+
+        cursor.execute(
+            """
+            SELECT channel_id, COUNT(*) AS cnt, COALESCE(SUM(COALESCE(views,0)),0) AS v
+            FROM telegram_posts
+            WHERE queue_id IS NULL
+              AND message_id IS NOT NULL
+              AND published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            GROUP BY channel_id
+            ORDER BY v DESC, cnt DESC
+            LIMIT 1
+            """,
+            (int(days),),
+        )
+        top_by_views = cursor.fetchone()
         cursor.execute(
             """
             SELECT channel_id, COUNT(*) AS cnt
             FROM telegram_posts
-            WHERE published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            WHERE queue_id IS NULL
+              AND message_id IS NOT NULL
+              AND published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
             GROUP BY channel_id
             ORDER BY cnt DESC
             LIMIT 1
@@ -324,10 +380,24 @@ def get_telegram_stats(days: int = 30):
         )
         top = cursor.fetchone()
         return {
-            "total_posts": int(row.get("total_posts") or 0),
-            "channels_count": int(row.get("channels_count") or 0),
+            "imported_messages": int(imported.get("imported_messages") or 0),
+            "imported_channels": int(imported.get("imported_channels") or 0),
+            "imported_views_sum": int(imported.get("imported_views_sum") or 0),
+            "imported_views_avg": float(imported.get("imported_views_avg") or 0.0),
+            "imported_last_at": imported.get("imported_last_at"),
+
+            "sent_messages": int(sent.get("sent_messages") or 0),
+            "sent_channels": int(sent.get("sent_channels") or 0),
+            "sent_last_at": sent.get("sent_last_at"),
+
+            "total_messages": int(total.get("total_messages") or 0),
+            "total_channels": int(total.get("total_channels") or 0),
+            "last_published_at": total.get("last_published_at"),
+
             "top_channel": (top or {}).get("channel_id"),
             "top_channel_count": int((top or {}).get("cnt") or 0),
+            "top_channel_by_views": (top_by_views or {}).get("channel_id"),
+            "top_channel_views": int((top_by_views or {}).get("v") or 0),
         }
     finally:
         cursor.close()

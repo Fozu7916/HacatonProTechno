@@ -29,6 +29,7 @@ from database.db import (
     get_telegram_stats,
 )
 from analytics.stats import get_dry_stats
+from analytics.tgstat_api import get_tgstat_summary
 from analytics.processor import process_incoming_post
 from publisher.scheduler import publish_next_post
 st.set_page_config(page_title="VK Volunteer Panel", layout="wide")
@@ -322,6 +323,18 @@ if role in ["СММ", "Руководитель", "Администратор"]:
                 set_setting("vk_user_token", (vk_user_token_in or "").strip())
                 st.sidebar.success("VK_USER_TOKEN сохранён")
                 st.rerun()
+        with st.sidebar.expander("📈 TGStat API токен (аналитика)", expanded=False):
+            current_tgstat_token = get_setting("tgstat_api_token", "") or ""
+            tgstat_token_in = st.text_input(
+                "TGStat API token",
+                value=current_tgstat_token,
+                type="password",
+                help="Токен с tgstat.ru/my/profile для внешней аналитики views/reach/ERR.",
+            )
+            if st.button("Сохранить TGStat token", key="save_tgstat_token_btn"):
+                set_setting("tgstat_api_token", (tgstat_token_in or "").strip())
+                st.sidebar.success("TGStat token сохранён")
+                st.rerun()
         with st.sidebar.expander("➕ Добавить группу VK"):
             new_group_id = st.text_input("ID группы", key="new_vk_group_id", placeholder="например: 123456789")
             new_group_name = st.text_input("Название группы", key="new_vk_group_name", placeholder="Название")
@@ -590,12 +603,23 @@ if role in ["Руководитель", "Наблюдатель", "Админи�
     if stats:
         for key, val in stats.items():
             st.sidebar.metric(key, val)
-    tg_stats = get_telegram_stats(days=30)
-    st.sidebar.subheader("Telegram (30 дней)")
-    st.sidebar.metric("Отправлено постов", tg_stats.get("total_posts", 0))
-    st.sidebar.metric("Активных каналов", tg_stats.get("channels_count", 0))
-    if tg_stats.get("top_channel"):
-        st.sidebar.caption(f"Топ-канал: {tg_stats['top_channel']} ({tg_stats.get('top_channel_count', 0)})")
+    st.sidebar.subheader("Telegram")
+    tgstat_token = (get_setting("tgstat_api_token", "") or "").strip()
+    tg_channels_for_stats = [str(ch["id"]) for ch in get_telegram_channels(active_only=True)]
+    if tgstat_token and tg_channels_for_stats:
+        ext = get_tgstat_summary(tgstat_token, tg_channels_for_stats)
+        ext_cols = st.sidebar.columns(2)
+        ext_cols[0].metric("Каналов (TGStat)", ext.get("channels_found", 0))
+        ext_cols[1].metric("Подписчики (сумма)", ext.get("subscribers", 0))
+        ext_cols2 = st.sidebar.columns(2)
+        ext_cols2[0].metric("ERR (%)", ext.get("avg_err", 0))
+        ext_cols2[1].metric("Coverage (%)", ext.get("coverage_rate", 0))
+        ext_cols3 = st.sidebar.columns(2)
+        ext_cols3[0].metric("Avg reach", ext.get("avg_reach", 0))
+        ext_cols3[1].metric("Avg views", ext.get("avg_views", 0))
+        st.sidebar.metric("Reach total (sum avg reach)", ext.get("reach_total", 0))
+    else:
+        st.sidebar.info("Добавьте TGStat API token и Telegram-каналы для отображения статистики.")
 
 # --- ОСНОВНАЯ ОБЛАСТЬ ---
 if role == "Наблюдатель":

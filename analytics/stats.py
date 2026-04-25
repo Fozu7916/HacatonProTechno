@@ -56,25 +56,6 @@ def get_dry_stats(limit=100):
     stats["Средний ER (%)"] = round(df['er'].mean(), 2)
 
 
-    try:
-        tg_conn = get_connection()
-        tg_df = pd.read_sql(
-            f"""
-            SELECT channel_id, views, published_at
-            FROM telegram_posts
-            ORDER BY published_at DESC
-            LIMIT {limit}
-            """,
-            tg_conn,
-        )
-        tg_conn.close()
-        if not tg_df.empty:
-            stats["TG постов"] = int(len(tg_df))
-            stats["TG каналов"] = int(tg_df["channel_id"].nunique())
-            stats["TG средние просмотры"] = round(float(tg_df["views"].fillna(0).mean()), 2)
-    except Exception:
-        pass
-
     top_posts = df.sort_values(by='views', ascending=False).head(3)
     
     return stats, top_posts
@@ -129,17 +110,28 @@ def get_stats_by_days(days=7):
     tg_posts = 0
     tg_channels = 0
     tg_views = 0
+    tg_sent = 0
+    tg_imported = 0
     try:
         tg_query = f"""
-            SELECT channel_id, views
+            SELECT
+                queue_id,
+                channel_id,
+                message_id,
+                views
             FROM telegram_posts
-            WHERE published_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+            WHERE message_id IS NOT NULL
+              AND published_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)
         """
         tg_df = pd.read_sql(tg_query, conn)
         if not tg_df.empty:
+            tg_df["uniq"] = tg_df["channel_id"].astype(str) + ":" + tg_df["message_id"].astype(str)
+            tg_df = tg_df.drop_duplicates(subset=["uniq"])
             tg_posts = int(len(tg_df))
             tg_channels = int(tg_df["channel_id"].nunique())
             tg_views = int(tg_df["views"].fillna(0).sum())
+            tg_sent = int((tg_df["queue_id"].notna()).sum())
+            tg_imported = int((tg_df["queue_id"].isna()).sum())
     except Exception:
         pass
     conn.close()
@@ -161,6 +153,8 @@ def get_stats_by_days(days=7):
             "TG постов": tg_posts,
             "TG каналов": tg_channels,
             "TG охват (views)": tg_views,
+            "TG отправлено системой": tg_sent,
+            "TG импортировано": tg_imported,
         },
         "chart_data": df[['date', 'views', 'likes']].set_index('date'),
         "daily_stats": df.groupby(df['date'].dt.date).agg({
