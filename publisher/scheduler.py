@@ -35,6 +35,23 @@ def publish_next_post():
         conn.close()
         return
 
+    # Атомарная защита от дублей:
+    # помечаем пост как posted ТОЛЬКО если он все еще ready.
+    # Если уже обработан другим кликом/процессом - выходим.
+    lock_cur = conn.cursor()
+    lock_cur.execute(
+        "UPDATE post_queue SET status = 'posted' WHERE id = %s AND status = 'ready'",
+        (post["id"],),
+    )
+    conn.commit()
+    if lock_cur.rowcount == 0:
+        lock_cur.close()
+        print(f"[Publisher] Пост ID {post['id']} уже обработан другим процессом.")
+        cursor.close()
+        conn.close()
+        return
+    lock_cur.close()
+
     if not GROUP_ID:
         print("[Publisher] Ошибка: GROUP_ID не найден в .env")
         conn.close()
@@ -72,12 +89,17 @@ def publish_next_post():
             from_group=1
         )
         
-        # 3. Сохраняем пост в таблице со статусом 'posted' для отчетности
-        cursor.execute("UPDATE post_queue SET status = 'posted' WHERE id = %s", (post['id'],))
-        conn.commit()
         print(f"[Publisher] Пост ID {post['id']} опубликован и помечен как posted.")
 
     except Exception as e:
+        # Возвращаем в ready, если публикация в VK не удалась
+        rollback_cur = conn.cursor()
+        rollback_cur.execute(
+            "UPDATE post_queue SET status = 'ready' WHERE id = %s AND status = 'posted'",
+            (post["id"],),
+        )
+        conn.commit()
+        rollback_cur.close()
         print(f"[Publisher] Ошибка при публикации: {e}")
     
     finally:
