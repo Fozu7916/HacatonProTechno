@@ -9,19 +9,28 @@ VK_TOKEN = os.getenv("VK_SERVICE_TOKEN") or os.getenv("VK_TOKEN")
 GROUP_ID = os.getenv("GROUP_ID")  # числовой ID группы (без минуса)
 
 
+def get_group_ids() -> list[str]:
+    """Возвращает список ID групп из GROUP_IDS или GROUP_ID."""
+    raw_ids = os.getenv("GROUP_IDS", "").strip()
+    if raw_ids:
+        return [gid.strip().replace("-", "") for gid in raw_ids.split(",") if gid.strip()]
+    single = str(os.getenv("GROUP_ID", "")).strip().replace("-", "")
+    return [single] if single else []
+
+
 def get_vk_session() -> vk_api.VkApi:
     session = vk_api.VkApi(token=VK_TOKEN)
     return session
 
 
-def fetch_posts(vk, count: int = 100, offset: int = 0) -> list[dict]:
+def fetch_posts(vk, group_id: str, count: int = 100, offset: int = 0) -> list[dict]:
     """
     Получает посты из сообщества.
     count  — сколько постов за один запрос (макс. 100)
     offset — смещение (для пагинации)
     """
     response = vk.wall.get(
-        owner_id=f"-{GROUP_ID}",
+        owner_id=f"-{group_id}",
         count=count,
         offset=offset,
         extended=0,
@@ -29,14 +38,14 @@ def fetch_posts(vk, count: int = 100, offset: int = 0) -> list[dict]:
     return response.get("items", [])
 
 
-def fetch_comments(vk, post_id: int, count: int = 100) -> list[dict]:
+def fetch_comments(vk, group_id: str, post_id: int, count: int = 100) -> list[dict]:
     """Получает комментарии к посту."""
     all_comments = []
     offset = 0
 
     while True:
         response = vk.wall.getComments(
-            owner_id=f"-{GROUP_ID}",
+            owner_id=f"-{group_id}",
             post_id=post_id,
             count=count,
             offset=offset,
@@ -74,10 +83,11 @@ def get_photo_url(vk, photo_id):
         print(f"[VK Photo URL Error] {e}")
         return None
 
-def upload_photo(vk, photo_file):
+def upload_photo(vk, photo_file, group_id: str = None):
     """Загружает фото на сервера VK и возвращает строку вложения."""
     import requests
-    gid = str(os.getenv("GROUP_ID", "")).strip().replace("-", "")
+    gids = get_group_ids()
+    gid = (group_id or (gids[0] if gids else "")).strip().replace("-", "")
     
     try:
         # Получаем сервер для загрузки именно на стену ГРУППЫ
@@ -119,7 +129,7 @@ def upload_doc(vk, file_obj, filename: str = "file.bin"):
         raise e
 
 
-def upload_attachment(vk, file_obj, filename: str):
+def upload_attachment(vk, file_obj, filename: str, group_id: str = None):
     """
     Универсальная загрузка вложения:
     - изображения -> photo
@@ -127,11 +137,11 @@ def upload_attachment(vk, file_obj, filename: str):
     """
     lower = filename.lower()
     if lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
-        return upload_photo(vk, file_obj)
+        return upload_photo(vk, file_obj, group_id=group_id)
     return upload_doc(vk, file_obj, filename=filename)
 
 
-def parse_all_posts(n: int = None) -> list[dict]:
+def parse_all_posts(n: int = None, group_ids: list[str] = None) -> list[dict]:
     """
     Парсит все (или последние n) постов сообщества вместе с комментариями.
     Возвращает список словарей: {"post": ..., "comments": [...]}
@@ -140,33 +150,43 @@ def parse_all_posts(n: int = None) -> list[dict]:
     vk = session.get_api()
 
     result = []
-    offset = 0
+    target_group_ids = group_ids or get_group_ids()
+    if not target_group_ids:
+        return result
+
     batch = 100
-    fetched = 0
+    per_group_limit = n if n is not None else None
 
-    while True:
-        to_fetch = batch if n is None else min(batch, n - fetched)
-        posts = fetch_posts(vk, count=to_fetch, offset=offset)
+    for group_id in target_group_ids:
+        offset = 0
+        fetched = 0
+        while True:
+            to_fetch = batch if per_group_limit is None else min(batch, per_group_limit - fetched)
+            if to_fetch <= 0:
+                break
+            posts = fetch_posts(vk, group_id=group_id, count=to_fetch, offset=offset)
 
-        if not posts:
-            break
+            if not posts:
+                break
 
-        for post in posts:
-            comments = []
-            if post.get("comments", {}).get("count", 0) > 0:
-                comments = fetch_comments(vk, post_id=post["id"])
-                time.sleep(0.34)
+            for post in posts:
+                comments = []
+                if post.get("comments", {}).get("count", 0) > 0:
+                    comments = fetch_comments(vk, group_id=group_id, post_id=post["id"])
+                    time.sleep(0.34)
 
-            result.append({"post": post, "comments": comments})
-            fetched += 1
+                result.append({"post": post, "comments": comments})
+                fetched += 1
 
-            if n is not None and fetched >= n:
-                return result
+                if per_group_limit is not None and fetched >= per_group_limit:
+                    break
 
-        if len(posts) < to_fetch:
-            break
+            if per_group_limit is not None and fetched >= per_group_limit:
+                break
+            if len(posts) < to_fetch:
+                break
 
-        offset += len(posts)
-        time.sleep(0.34)
+            offset += len(posts)
+            time.sleep(0.34)
 
     return result

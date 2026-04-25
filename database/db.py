@@ -46,6 +46,16 @@ def init_db():
             FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
         )
     """)
+    # Таблица групп VK
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vk_groups (
+            id         INT PRIMARY KEY,
+            name       VARCHAR(255) NOT NULL,
+            token      VARCHAR(255) NOT NULL,
+            is_active  TINYINT(1) DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     # Таблица очереди
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS post_queue (
@@ -133,6 +143,38 @@ def init_db():
     auto_approve_pending_requests()
     
     print("[DB] Все таблицы инициализированы.")
+
+
+def get_vk_groups(active_only: bool = True):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    if active_only:
+        cursor.execute("SELECT id, name, token, is_active FROM vk_groups WHERE is_active = 1 ORDER BY id")
+    else:
+        cursor.execute("SELECT id, name, token, is_active FROM vk_groups ORDER BY id")
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
+
+
+def upsert_vk_group(group_id: int, name: str, token: str, is_active: bool = True):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO vk_groups (id, name, token, is_active)
+        VALUES (%s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            name = VALUES(name),
+            token = VALUES(token),
+            is_active = VALUES(is_active)
+        """,
+        (group_id, name, token, 1 if is_active else 0),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
 def get_setting(key, default=None):
     conn = get_connection()
     cursor = conn.cursor()
@@ -174,14 +216,22 @@ def upsert_post(post: dict):
     cursor = conn.cursor()
     # Составляем полный ID поста: owner_id_post_id
     full_post_id = int(str(post["owner_id"]).replace("-", "") + str(post["id"]).zfill(10))
+    group_id = abs(int(post["owner_id"]))
+    # Для БД со связью posts.group_id -> vk_groups.id:
+    # гарантируем, что запись о группе существует.
     cursor.execute("""
-        INSERT INTO posts (id, owner_id, date, text, likes, reposts, views, comments, attachments)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO vk_groups (id, name, token)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE id = id
+    """, (group_id, f"Группа {group_id}", ""))
+    cursor.execute("""
+        INSERT INTO posts (id, owner_id, group_id, date, text, likes, reposts, views, comments, attachments)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
-            text = VALUES(text), likes = VALUES(likes), reposts = VALUES(reposts),
+            owner_id = VALUES(owner_id), group_id = VALUES(group_id), text = VALUES(text), likes = VALUES(likes), reposts = VALUES(reposts),
             views = VALUES(views), comments = VALUES(comments), attachments = VALUES(attachments)
     """, (
-        full_post_id, post["owner_id"], datetime.fromtimestamp(post["date"]),
+        full_post_id, post["owner_id"], group_id, datetime.fromtimestamp(post["date"]),
         post.get("text", ""), post.get("likes", {}).get("count", 0),
         post.get("reposts", {}).get("count", 0), post.get("views", {}).get("count", 0),
         post.get("comments", {}).get("count", 0),

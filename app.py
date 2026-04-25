@@ -22,6 +22,8 @@ from database.db import (
     get_pending_registrations,
     approve_registration,
     reject_registration,
+    get_vk_groups,
+    upsert_vk_group,
 )
 from analytics.stats import get_dry_stats
 from analytics.processor import process_incoming_post
@@ -35,6 +37,17 @@ ATTACHMENT_TYPES = [
     "mp4", "mov", "avi", "mkv",
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "zip", "rar",
 ]
+
+
+def get_available_groups() -> list[dict]:
+    groups = get_vk_groups(active_only=True)
+    if groups:
+        return groups
+    raw_ids = os.getenv("GROUP_IDS", "").strip()
+    if raw_ids:
+        return [{"id": int(gid.strip().replace("-", "")), "name": f"Группа {gid.strip()}", "token": "", "is_active": 1} for gid in raw_ids.split(",") if gid.strip()]
+    single = str(os.getenv("GROUP_ID", "")).strip().replace("-", "")
+    return [{"id": int(single), "name": f"Группа {single}", "token": "", "is_active": 1}] if single else []
 
 
 def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редактор") -> str:
@@ -275,6 +288,35 @@ if role in ["СММ", "СММ-специалист"]:
     role = "СММ"
 user_code = auth_user["code"]
 st.sidebar.caption(f"Пользователь: {auth_user['full_name']} ({user_code})")
+selected_group_ids = []
+if role in ["СММ", "Руководитель", "Администратор"]:
+    if role == "Администратор":
+        with st.sidebar.expander("➕ Добавить группу VK"):
+            new_group_id = st.text_input("ID группы", key="new_vk_group_id", placeholder="например: 123456789")
+            new_group_name = st.text_input("Название группы", key="new_vk_group_name", placeholder="Название")
+            new_group_token = st.text_input("API токен группы", key="new_vk_group_token", type="password")
+            if st.button("Сохранить группу", key="save_vk_group_btn"):
+                try:
+                    gid = int(str(new_group_id).strip().replace("-", ""))
+                    gname = (new_group_name or f"Группа {gid}").strip()
+                    upsert_vk_group(gid, gname, (new_group_token or "").strip(), is_active=True)
+                    st.sidebar.success(f"Группа {gname} сохранена")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Ошибка сохранения группы: {e}")
+    available_groups = get_available_groups()
+    if available_groups:
+        group_options = [str(g["id"]) for g in available_groups]
+        group_name_map = {str(g["id"]): g.get("name") or f"Группа {g['id']}" for g in available_groups}
+        selected_group_ids = st.sidebar.multiselect(
+            "Группы VK",
+            options=group_options,
+            default=group_options,
+            format_func=lambda gid: f"{group_name_map.get(gid, 'Группа')} ({gid})",
+            help="Выберите группы для парсинга и публикации",
+        )
+    else:
+        st.sidebar.warning("Нет активных групп VK. Добавьте группу в блоке выше.")
 
 # Кнопка для изменения логина/пароля
 if st.sidebar.button("🔐 Изменить логин/пароль"):
@@ -349,7 +391,7 @@ if role in ["Руководитель", "Наблюдатель", "Админи�
         with st.sidebar.status("Парсинг..."):
             from parser.vk_parser import parse_all_posts
             from database.db import upsert_post
-            data = parse_all_posts(n=200)
+            data = parse_all_posts(n=200, group_ids=selected_group_ids or None)
             for item in data:
                 upsert_post(item["post"])
         st.sidebar.success("Обновлено!")
@@ -922,7 +964,7 @@ if role not in ["Руководитель", "Наблюдатель"]:
     # Кнопка публикации только для СММ и Руководителя
     if role in ["СММ", "Руководитель", "Администратор"]:
         if st.button("🚀 Опубликовать следующий по приоритету"):
-            publish_next_post()
+            publish_next_post(target_groups=selected_group_ids or None)
             st.rerun()
 
 if role != "Наблюдатель":
