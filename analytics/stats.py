@@ -56,6 +56,25 @@ def get_dry_stats(limit=100):
     stats["Средний ER (%)"] = round(df['er'].mean(), 2)
 
 
+    try:
+        tg_conn = get_connection()
+        tg_df = pd.read_sql(
+            f"""
+            SELECT channel_id, views, published_at
+            FROM telegram_posts
+            ORDER BY published_at DESC
+            LIMIT {limit}
+            """,
+            tg_conn,
+        )
+        tg_conn.close()
+        if not tg_df.empty:
+            stats["TG постов"] = int(len(tg_df))
+            stats["TG каналов"] = int(tg_df["channel_id"].nunique())
+            stats["TG средние просмотры"] = round(float(tg_df["views"].fillna(0).mean()), 2)
+    except Exception:
+        pass
+
     top_posts = df.sort_values(by='views', ascending=False).head(3)
     
     return stats, top_posts
@@ -71,7 +90,6 @@ def get_stats_by_days(days=7):
         ORDER BY date DESC
     """
     df = pd.read_sql(query, conn)
-    conn.close()
     
     if df.empty:
         return None
@@ -108,15 +126,41 @@ def get_stats_by_days(days=7):
     df['day_name'] = df['date'].dt.day_name()
     best_day = df.groupby('day_name')['er'].mean().idxmax()
 
+    tg_posts = 0
+    tg_channels = 0
+    tg_views = 0
+    try:
+        tg_query = f"""
+            SELECT channel_id, views
+            FROM telegram_posts
+            WHERE published_at >= DATE_SUB(NOW(), INTERVAL {days} DAY)
+        """
+        tg_df = pd.read_sql(tg_query, conn)
+        if not tg_df.empty:
+            tg_posts = int(len(tg_df))
+            tg_channels = int(tg_df["channel_id"].nunique())
+            tg_views = int(tg_df["views"].fillna(0).sum())
+    except Exception:
+        pass
+    conn.close()
+
+    combined_posts = int(len(df)) + int(tg_posts or 0)
+    combined_reach = int(df["views"].sum()) + int(tg_views or 0)
+
     return {
         "stats": {
             "Период (дней)": days,
-            "Всего постов": len(df),
-            "Всего охвата": int(df['views'].sum()),
+            "Всего постов": combined_posts,
+            "Всего охвата": combined_reach,
             "Средний ER (%)": round(df['er'].mean(), 2),
             "Лучшие часы": ", ".join([f"{h}:00" for h in best_hours]),
             "Лучший день недели": best_day,
-            "Ключевые темы": ", ".join(common_words)
+            "Ключевые темы": ", ".join(common_words),
+            "VK постов": int(len(df)),
+            "VK охват (views)": int(df["views"].sum()),
+            "TG постов": tg_posts,
+            "TG каналов": tg_channels,
+            "TG охват (views)": tg_views,
         },
         "chart_data": df[['date', 'views', 'likes']].set_index('date'),
         "daily_stats": df.groupby(df['date'].dt.date).agg({

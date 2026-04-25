@@ -113,11 +113,14 @@ def upload_photo(vk, photo_file, group_id: str = None):
         raise e
 
 
-def upload_doc(vk, file_obj, filename: str = "file.bin"):
+def upload_doc(vk, file_obj, filename: str = "file.bin", group_id: str = None):
     """Загружает документ/видео (как doc) на сервера VK и возвращает attachment."""
     import requests
     try:
-        upload_server = vk.docs.getWallUploadServer()
+        kwargs = {}
+        if group_id:
+            kwargs["group_id"] = str(group_id).strip().replace("-", "")
+        upload_server = vk.docs.getWallUploadServer(**kwargs)
         upload_url = upload_server["upload_url"]
         files = {"file": (filename, file_obj)}
         response = requests.post(upload_url, files=files).json()
@@ -138,7 +141,7 @@ def upload_attachment(vk, file_obj, filename: str, group_id: str = None):
     lower = filename.lower()
     if lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
         return upload_photo(vk, file_obj, group_id=group_id)
-    return upload_doc(vk, file_obj, filename=filename)
+    return upload_doc(vk, file_obj, filename=filename, group_id=group_id)
 
 
 def parse_all_posts(n: int = None, group_ids: list[str] = None) -> list[dict]:
@@ -164,7 +167,11 @@ def parse_all_posts(n: int = None, group_ids: list[str] = None) -> list[dict]:
             to_fetch = batch if per_group_limit is None else min(batch, per_group_limit - fetched)
             if to_fetch <= 0:
                 break
-            posts = fetch_posts(vk, group_id=group_id, count=to_fetch, offset=offset)
+            try:
+                posts = fetch_posts(vk, group_id=group_id, count=to_fetch, offset=offset)
+            except Exception as e:
+                print(f"[VK Parser] Пропуск группы {group_id}: {e}")
+                break
 
             if not posts:
                 break

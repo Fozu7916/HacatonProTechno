@@ -58,6 +58,30 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Таблица Telegram-каналов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_channels (
+            id         VARCHAR(255) PRIMARY KEY,
+            name       VARCHAR(255) NOT NULL,
+            bot_token  VARCHAR(255) NOT NULL,
+            tags       TEXT,
+            is_active  TINYINT(1) DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Лог опубликованных сообщений Telegram
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_posts (
+            id            INT AUTO_INCREMENT PRIMARY KEY,
+            queue_id      INT,
+            channel_id    VARCHAR(255) NOT NULL,
+            message_id    BIGINT,
+            text          TEXT,
+            attachment    VARCHAR(500),
+            views         INT DEFAULT 0,
+            published_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     # Таблица очереди
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS post_queue (
@@ -67,6 +91,7 @@ def init_db():
             suggested_text TEXT,
             attachments   TEXT,
             target_group_ids TEXT,
+            target_telegram_ids TEXT,
             priority      INT DEFAULT 1,
             author_role   ENUM('smm', 'volunteer') DEFAULT 'volunteer',
             author_code   VARCHAR(20),
@@ -91,10 +116,11 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             `key`   VARCHAR(50) PRIMARY KEY,
-            `value` VARCHAR(255)
+            `value` TEXT
         )
     """)
     cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('posts_per_day', '3')")
+    cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('vk_user_token', '')")
 
     # Таблица пользователей
     cursor.execute("""
@@ -128,15 +154,24 @@ def init_db():
     for col_sql in [
         "ALTER TABLE posts ADD COLUMN group_id BIGINT",
         "ALTER TABLE vk_groups ADD COLUMN tags TEXT",
+        "ALTER TABLE telegram_channels ADD COLUMN tags TEXT",
+        "ALTER TABLE telegram_posts ADD COLUMN attachment VARCHAR(500)",
+        "ALTER TABLE telegram_posts ADD COLUMN views INT DEFAULT 0",
+        "ALTER TABLE settings MODIFY COLUMN `value` TEXT",
         "ALTER TABLE post_queue ADD COLUMN title VARCHAR(255)",
         "ALTER TABLE post_queue ADD COLUMN author_code VARCHAR(20)",
         "ALTER TABLE post_queue ADD COLUMN approver_code VARCHAR(20)",
         "ALTER TABLE post_queue ADD COLUMN target_group_ids TEXT",
+        "ALTER TABLE post_queue ADD COLUMN target_telegram_ids TEXT",
     ]:
         try:
             cursor.execute(col_sql)
         except Exception:
             pass
+    try:
+        cursor.execute("ALTER TABLE telegram_posts ADD UNIQUE KEY uq_tg_channel_message (channel_id, message_id)")
+    except Exception:
+        pass
 
     conn.commit()
     cursor.close()
@@ -182,6 +217,123 @@ def upsert_vk_group(group_id: int, name: str, token: str, tags: str = "", is_act
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def get_telegram_channels(active_only: bool = True):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if active_only:
+            cursor.execute("SELECT id, name, bot_token, tags, is_active FROM telegram_channels WHERE is_active = 1 ORDER BY name")
+        else:
+            cursor.execute("SELECT id, name, bot_token, tags, is_active FROM telegram_channels ORDER BY name")
+        res = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return res
+    except Exception:
+        cursor.close()
+        conn.close()
+        return []
+
+
+def upsert_telegram_channel(channel_id: str, name: str, bot_token: str, tags: str = "", is_active: bool = True):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO telegram_channels (id, name, bot_token, tags, is_active)
+        VALUES (%s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            name = VALUES(name),
+            bot_token = VALUES(bot_token),
+            tags = VALUES(tags),
+            is_active = VALUES(is_active)
+        """,
+        ((channel_id or "").strip(), (name or "").strip(), (bot_token or "").strip(), (tags or "").strip(), 1 if is_active else 0),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def add_telegram_post_log(queue_id: int, channel_id: str, message_id: int = None, text: str = None, attachment: str = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO telegram_posts (queue_id, channel_id, message_id, text, attachment)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (queue_id, str(channel_id), message_id, text, attachment),
+        )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def upsert_telegram_channel_post(channel_id: str, message_id: int, text: str = None, published_at=None, views: int = 0):
+    """Сохраняет пост, полученный из Telegram-канала (через getUpdates)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO telegram_posts (channel_id, message_id, text, published_at, views)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                text = VALUES(text),
+                published_at = VALUES(published_at),
+                views = VALUES(views)
+            """,
+            (str(channel_id), int(message_id), text, published_at, int(views or 0)),
+        )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def get_telegram_stats(days: int = 30):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS total_posts,
+                COUNT(DISTINCT channel_id) AS channels_count
+            FROM telegram_posts
+            WHERE published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            """,
+            (int(days),),
+        )
+        row = cursor.fetchone() or {}
+        cursor.execute(
+            """
+            SELECT channel_id, COUNT(*) AS cnt
+            FROM telegram_posts
+            WHERE published_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+            GROUP BY channel_id
+            ORDER BY cnt DESC
+            LIMIT 1
+            """,
+            (int(days),),
+        )
+        top = cursor.fetchone()
+        return {
+            "total_posts": int(row.get("total_posts") or 0),
+            "channels_count": int(row.get("channels_count") or 0),
+            "top_channel": (top or {}).get("channel_id"),
+            "top_channel_count": int((top or {}).get("cnt") or 0),
+        }
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_setting(key, default=None):
     conn = get_connection()
     cursor = conn.cursor()
@@ -276,6 +428,7 @@ def add_to_queue(
     author_code: str = None,
     approver_code: str = None,
     target_group_ids: str = None,
+    target_telegram_ids: str = None,
 ):
     """Добавляет пост в очередь на публикацию."""
     title_val = title or ((text or "").splitlines()[0][:255] if text else "Без заголовка")
@@ -283,14 +436,20 @@ def add_to_queue(
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code, target_group_ids)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code, target_group_ids))
+            INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code, target_group_ids, target_telegram_ids)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code, target_group_ids, target_telegram_ids))
     except Exception:
-        cursor.execute("""
-            INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code))
+        try:
+            cursor.execute("""
+                INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code, target_group_ids)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code, target_group_ids))
+        except Exception:
+            cursor.execute("""
+                INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code))
     conn.commit()
     cursor.close()
     conn.close()
