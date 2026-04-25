@@ -15,25 +15,40 @@ def get_vk_session():
     # Для постинга нужен токен с правами 'wall'
     return vk_api.VkApi(token=VK_TOKEN).get_api()
 
-def publish_next_post():
-    """Находит самый приоритетный пост и публикует его."""
+def publish_next_post(only_due: bool = False):
+    """
+    Находит и публикует следующий пост.
+    only_due=True: публикует только посты, где scheduled_at <= NOW() (или scheduled_at IS NULL).
+    Возвращает True, если публикация выполнена.
+    """
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
 
     # 1. Берем самый приоритетный и старый пост со статусом 'ready'
-    cursor.execute("""
-        SELECT id, suggested_text, priority, attachments 
-        FROM post_queue 
-        WHERE status = 'ready' 
-        ORDER BY priority DESC, created_at ASC 
-        LIMIT 1
-    """)
+    if only_due:
+        cursor.execute("""
+            SELECT id, suggested_text, priority, attachments
+            FROM post_queue
+            WHERE status = 'ready'
+              AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+            ORDER BY priority DESC, created_at ASC
+            LIMIT 1
+        """)
+    else:
+        cursor.execute("""
+            SELECT id, suggested_text, priority, attachments
+            FROM post_queue
+            WHERE status = 'ready'
+            ORDER BY priority DESC, created_at ASC
+            LIMIT 1
+        """)
     post = cursor.fetchone()
 
     if not post:
-        print("[Publisher] Очередь пуста.")
+        print("[Publisher] Нет постов для публикации.")
+        cursor.close()
         conn.close()
-        return
+        return False
 
     # Атомарная защита от дублей:
     # помечаем пост как posted ТОЛЬКО если он все еще ready.
@@ -49,13 +64,14 @@ def publish_next_post():
         print(f"[Publisher] Пост ID {post['id']} уже обработан другим процессом.")
         cursor.close()
         conn.close()
-        return
+        return False
     lock_cur.close()
 
     if not GROUP_ID:
         print("[Publisher] Ошибка: GROUP_ID не найден в .env")
+        cursor.close()
         conn.close()
-        return
+        return False
 
     print(f"[Publisher] Публикуем пост ID {post['id']} (Приоритет: {post['priority']}) в группу {GROUP_ID}...")
 
@@ -90,6 +106,7 @@ def publish_next_post():
         )
         
         print(f"[Publisher] Пост ID {post['id']} опубликован и помечен как posted.")
+        return True
 
     except Exception as e:
         # Возвращаем в ready, если публикация в VK не удалась
@@ -101,6 +118,7 @@ def publish_next_post():
         conn.commit()
         rollback_cur.close()
         print(f"[Publisher] Ошибка при публикации: {e}")
+        return False
     
     finally:
         cursor.close()
