@@ -143,6 +143,115 @@ def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редакто
     raise ValueError(f"Не удалось сгенерировать текст через ИИ: {last_error}")
 
 
+def publish_poll_to_telegram(
+    channel_ids: list[str],
+    question: str,
+    options: list[str],
+    is_quiz: bool = False,
+    correct_option_id: int = 0,
+    allows_multiple_answers: bool = False,
+    is_anonymous: bool = True,
+) -> tuple[int, int]:
+    channels = get_telegram_channels(active_only=True)
+    token_map = {str(ch["id"]): (ch.get("bot_token") or "").strip() for ch in channels}
+    success = 0
+    failed = 0
+    for channel_id in channel_ids:
+        token = token_map.get(str(channel_id)) or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        if not token:
+            failed += 1
+            continue
+        payload = {
+            "chat_id": str(channel_id),
+            "question": question.strip(),
+            "options": options,
+            "is_anonymous": bool(is_anonymous),
+            "allows_multiple_answers": bool(allows_multiple_answers),
+            "type": "quiz" if is_quiz else "regular",
+        }
+        if is_quiz:
+            payload["correct_option_id"] = int(correct_option_id)
+            payload["allows_multiple_answers"] = False
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{token}/sendPoll",
+                json=payload,
+                timeout=30,
+            )
+            if resp.ok and (resp.json() or {}).get("ok"):
+                success += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    return success, failed
+
+
+def publish_poll_to_vk(
+    group_ids: list[str],
+    question: str,
+    options: list[str],
+    is_quiz: bool = False,
+    correct_option_id: int = 0,
+) -> tuple[int, int, list[str]]:
+    import json
+    import vk_api
+
+    vk_user_token = (get_setting("vk_user_token", "") or "").strip() or os.getenv("VK_USER_TOKEN", "").strip()
+    if not vk_user_token:
+        return 0, len(group_ids or []), ["Не задан VK_USER_TOKEN"]
+
+    clean_opts = [o.strip() for o in options if o and o.strip()]
+    if len(clean_opts) < 2:
+        return 0, len(group_ids or []), ["Недостаточно вариантов для опроса"]
+
+    message = "🧠 Викторина" if is_quiz else ""
+
+    success = 0
+    failed = 0
+    errors = []
+    try:
+        vk = vk_api.VkApi(token=vk_user_token).get_api()
+    except Exception as e:
+        return 0, len(group_ids or []), [f"Ошибка авторизации VK: {e}"]
+
+    for gid in group_ids or []:
+        try:
+            owner_id = -int(str(gid).strip().replace("-", ""))
+            poll = None
+            # Нативный опрос VK
+            try:
+                poll = vk.polls.create(
+                    owner_id=owner_id,
+                    question=question.strip()[:255],
+                    is_anonymous=0,
+                    add_answers=json.dumps(clean_opts, ensure_ascii=False),
+                )
+            except Exception:
+                # Fallback: создаем опрос от пользователя и прикрепляем к посту группы
+                poll = vk.polls.create(
+                    question=question.strip()[:255],
+                    is_anonymous=0,
+                    add_answers=json.dumps(clean_opts, ensure_ascii=False),
+                )
+            poll_owner = poll.get("owner_id")
+            poll_id = poll.get("id")
+            if not poll_owner or not poll_id:
+                raise ValueError("Не удалось создать VK-опрос")
+            attachment = f"poll{poll_owner}_{poll_id}"
+            vk.wall.post(
+                owner_id=owner_id,
+                from_group=1,
+                message=message,
+                attachments=attachment,
+            )
+            success += 1
+        except Exception as e:
+            failed += 1
+            errors.append(f"Группа {gid}: {e}")
+    return success, failed, errors
+
+
 def build_excel_report(report_data: dict) -> bytes:
     """Собирает Excel-отчет по данным аналитики."""
     output = io.BytesIO()
@@ -1230,6 +1339,78 @@ if role != "Наблюдатель":
         st.dataframe(queue_view, width='stretch')
     else:
         st.write("Очередь пуста.")
+
+if role in ["СММ", "Руководитель", "Администратор"]:
+    st.markdown("---")
+    st.subheader("🧩 Конструктор опросов и викторин")
+    poll_type = st.radio("Тип интерактива", ["Опрос", "Викторина"], horizontal=True, key="poll_builder_type")
+    poll_question = st.text_input("Вопрос", key="poll_builder_question", placeholder="Например: Придёте на мероприятие в субботу?")
+    options_count = st.number_input("Количество вариантов", min_value=2, max_value=8, value=4, step=1, key="poll_builder_options_count")
+    poll_options = []
+    cols = st.columns(2)
+    for i in range(int(options_count)):
+        with cols[i % 2]:
+            val = st.text_input(f"Вариант {i + 1}", key=f"poll_builder_opt_{i}")
+            poll_options.append(val.strip())
+    poll_is_anon = st.checkbox("Анонимный опрос", value=True, key="poll_builder_is_anon")
+    poll_multi = st.checkbox("Разрешить несколько ответов", value=False, key="poll_builder_multi")
+    correct_idx = 0
+    if poll_type == "Викторина":
+        labels = [opt if opt else f"Вариант {i + 1}" for i, opt in enumerate(poll_options)]
+        correct_idx = st.selectbox(
+            "Правильный ответ",
+            options=list(range(len(labels))),
+            format_func=lambda idx: labels[idx],
+            key="poll_builder_correct_idx",
+        )
+
+    if st.button("📤 Опубликовать опрос в Telegram", key="publish_poll_tg_btn"):
+        clean_opts = [o for o in poll_options if o]
+        if not selected_telegram_ids:
+            st.error("Выберите Telegram-каналы в боковой панели.")
+        elif not poll_question.strip():
+            st.error("Введите вопрос опроса.")
+        elif len(clean_opts) < 2:
+            st.error("Добавьте минимум 2 непустых варианта.")
+        else:
+            ok_cnt, fail_cnt = publish_poll_to_telegram(
+                selected_telegram_ids,
+                poll_question,
+                clean_opts,
+                is_quiz=(poll_type == "Викторина"),
+                correct_option_id=min(int(correct_idx), len(clean_opts) - 1),
+                allows_multiple_answers=poll_multi,
+                is_anonymous=poll_is_anon,
+            )
+            if ok_cnt:
+                st.success(f"Опрос отправлен в {ok_cnt} канал(ов).")
+            if fail_cnt:
+                st.warning(f"Не удалось отправить в {fail_cnt} канал(ов). Проверьте права бота.")
+
+    if st.button("📤 Опубликовать опрос в VK", key="publish_poll_vk_btn"):
+        clean_opts = [o for o in poll_options if o]
+        if not selected_group_ids:
+            st.error("Выберите VK-группы в боковой панели.")
+        elif not poll_question.strip():
+            st.error("Введите вопрос опроса.")
+        elif len(clean_opts) < 2:
+            st.error("Добавьте минимум 2 непустых варианта.")
+        else:
+            ok_cnt, fail_cnt, err_list = publish_poll_to_vk(
+                selected_group_ids,
+                poll_question,
+                clean_opts,
+                is_quiz=(poll_type == "Викторина"),
+                correct_option_id=min(int(correct_idx), len(clean_opts) - 1),
+            )
+            if ok_cnt:
+                st.success(f"Опрос опубликован в VK-группы: {ok_cnt}.")
+            if fail_cnt:
+                st.warning(f"Не удалось опубликовать в {fail_cnt} VK-групп(ы).")
+                if err_list:
+                    with st.expander("Подробности ошибок VK", expanded=False):
+                        for err in err_list[:10]:
+                            st.code(err)
 
 with tab_a:
     st.header("Архив постов из VK")
