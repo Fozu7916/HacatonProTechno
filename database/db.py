@@ -112,8 +112,14 @@ def init_db():
     conn.commit()
     cursor.close()
     conn.close()
+    
+    # Создаем автоадминистратора
+    create_auto_admin()
+    
+    # Автоматически одобряем все ожидающие заявки
+    auto_approve_pending_requests()
+    
     print("[DB] Все таблицы инициализированы.")
-
 def get_setting(key, default=None):
     conn = get_connection()
     cursor = conn.cursor()
@@ -266,3 +272,94 @@ def authenticate_user(email: str, password: str):
         return None
     user.pop("password_hash", None)
     return user
+
+
+def create_auto_admin():
+    """Создает автоадминистратора при инициализации БД."""
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Проверяем, существует ли уже автоадминистратор
+        cursor.execute("SELECT id FROM users WHERE email = %s", ("root",))
+        if cursor.fetchone():
+            cursor.close()
+            conn.close()
+            return "Автоадминистратор уже существует"
+        
+        # Создаем автоадминистратора
+        code = "AUTO_ADMIN_1"
+        cursor.execute(
+            "INSERT INTO users (code, full_name, email, password_hash, role) VALUES (%s, %s, %s, %s, %s)",
+            (code, "Автоадминистратор", "root", _hash_password("root"), "Администратор"),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return f"Автоадминистратор создан: {code}"
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise e
+
+def auto_approve_pending_requests():
+    """Автоматически одобряет все ожидающие заявки."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        # Получаем ID автоадминистратора
+        cursor.execute("SELECT code FROM users WHERE email = %s", ("auto_admin@system.local",))
+        admin_result = cursor.fetchone()
+        if not admin_result:
+            cursor.close()
+            conn.close()
+            return 0
+        
+        admin_code = admin_result[0]
+        
+        # Обновляем все pending заявки на ready и устанавливаем approver_code
+        cursor.execute(
+            "UPDATE post_queue SET status = %s, approver_code = %s WHERE status = %s",
+            ("ready", admin_code, "pending"),
+        )
+        conn.commit()
+        affected_rows = cursor.rowcount
+        cursor.close()
+        conn.close()
+        return affected_rows
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise e
+
+
+def update_user_credentials(email: str, new_password: str = None, new_email: str = None):
+    """Обновляет учетные данные пользователя."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        if new_email and new_password:
+            cursor.execute(
+                "UPDATE users SET email = %s, password_hash = %s WHERE email = %s",
+                (new_email, _hash_password(new_password), email),
+            )
+        elif new_password:
+            cursor.execute(
+                "UPDATE users SET password_hash = %s WHERE email = %s",
+                (_hash_password(new_password), email),
+            )
+        elif new_email:
+            cursor.execute(
+                "UPDATE users SET email = %s WHERE email = %s",
+                (new_email, email),
+            )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise e

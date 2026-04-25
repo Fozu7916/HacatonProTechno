@@ -17,6 +17,7 @@ from database.db import (
     add_to_queue,
     create_user,
     authenticate_user,
+    update_user_credentials,
 )
 from analytics.stats import get_dry_stats
 from analytics.processor import process_incoming_post
@@ -270,10 +271,71 @@ if role in ["СММ", "СММ-специалист"]:
     role = "СММ"
 user_code = auth_user["code"]
 st.sidebar.caption(f"Пользователь: {auth_user['full_name']} ({user_code})")
+
+# Кнопка для изменения логина/пароля
+if st.sidebar.button("🔐 Изменить логин/пароль"):
+    st.session_state["show_credentials_modal"] = True
+
+# Модальное окно для изменения учетных данных
+if st.session_state.get("show_credentials_modal", False):
+    with st.sidebar.expander("🔐 Изменить учетные данные", expanded=True):
+        st.warning("⚠️ Оставьте поле пустым, если не хотите его менять")
+        
+        new_email = st.text_input(
+            "Новая почта (опционально)",
+            value="",
+            key="change_email_input",
+            placeholder=auth_user["email"]
+        )
+        
+        new_password = st.text_input(
+            "Новый пароль (опционально)",
+            type="password",
+            value="",
+            key="change_password_input",
+            placeholder="Введите новый пароль"
+        )
+        
+        confirm_password = st.text_input(
+            "Подтвердите пароль",
+            type="password",
+            value="",
+            key="confirm_password_input",
+            placeholder="Повторите пароль"
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Сохранить", key="save_credentials_btn"):
+                # Валидация
+                if new_password and new_password != confirm_password:
+                    st.error("❌ Пароли не совпадают!")
+                elif not new_email and not new_password:
+                    st.warning("⚠️ Укажите хотя бы одно поле для изменения")
+                else:
+                    try:
+                        update_user_credentials(
+                            auth_user["email"],
+                            new_password=new_password if new_password else None,
+                            new_email=new_email if new_email else None
+                        )
+                        st.success("✅ Учетные данные обновлены!")
+                        # Обновляем session_state если изменена почта
+                        if new_email:
+                            auth_user["email"] = new_email
+                        st.session_state["show_credentials_modal"] = False
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Ошибка: {e}")
+        
+        with col2:
+            if st.button("❌ Отмена", key="cancel_credentials_btn"):
+                st.session_state["show_credentials_modal"] = False
+                st.rerun()
+
 if st.sidebar.button("Выйти"):
     st.session_state["auth_user"] = None
     st.rerun()
-
 if role in ["Руководитель", "Наблюдатель", "Администратор"]:
     st.sidebar.header("⚙️ Управление")
     # Слайдер теперь от 1 поста
