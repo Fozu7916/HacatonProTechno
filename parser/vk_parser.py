@@ -103,6 +103,34 @@ def upload_photo(vk, photo_file):
         raise e
 
 
+def upload_doc(vk, file_obj, filename: str = "file.bin"):
+    """Загружает документ/видео (как doc) на сервера VK и возвращает attachment."""
+    import requests
+    try:
+        upload_server = vk.docs.getWallUploadServer()
+        upload_url = upload_server["upload_url"]
+        files = {"file": (filename, file_obj)}
+        response = requests.post(upload_url, files=files).json()
+        save_res = vk.docs.save(file=response["file"], title=filename)
+        doc = save_res["doc"]
+        return f"doc{doc['owner_id']}_{doc['id']}"
+    except Exception as e:
+        print(f"[VK Doc Upload Error] {e}")
+        raise e
+
+
+def upload_attachment(vk, file_obj, filename: str):
+    """
+    Универсальная загрузка вложения:
+    - изображения -> photo
+    - остальные файлы (видео/документы) -> doc
+    """
+    lower = filename.lower()
+    if lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        return upload_photo(vk, file_obj)
+    return upload_doc(vk, file_obj, filename=filename)
+
+
 def parse_all_posts(n: int = None) -> list[dict]:
     """
     Парсит все (или последние n) постов сообщества вместе с комментариями.

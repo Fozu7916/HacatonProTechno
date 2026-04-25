@@ -49,18 +49,21 @@ def publish_next_post():
         # owner_id для групп ВСЕГДА должен быть отрицательным
         target_id = -int(str(GROUP_ID).strip())
         
-        # Подготовка вложений
-        post_attachments = post.get('attachments')
-        
-        # Если вложение - локальный путь к файлу, загружаем его в VK перед постингом
-        if post_attachments and os.path.exists(str(post_attachments)):
-            try:
-                from parser.vk_parser import upload_photo
-                with open(post_attachments, 'rb') as f:
-                    post_attachments = upload_photo(vk, f)
-            except Exception as upload_err:
-                print(f"[Publisher] Ошибка загрузки локального файла в VK: {upload_err}")
-                # Если не удалось загрузить, пробуем постить без вложения или как есть
+        # Подготовка вложений: может быть список через запятую
+        attachments_raw = (post.get('attachments') or "").strip()
+        attachment_items = [a.strip() for a in attachments_raw.split(",") if a.strip()]
+        resolved_attachments = []
+        for item in attachment_items:
+            if os.path.exists(item):
+                try:
+                    from parser.vk_parser import upload_attachment
+                    with open(item, 'rb') as f:
+                        resolved_attachments.append(upload_attachment(vk, f, os.path.basename(item)))
+                except Exception as upload_err:
+                    print(f"[Publisher] Ошибка загрузки файла {item} в VK: {upload_err}")
+            else:
+                resolved_attachments.append(item)
+        post_attachments = ",".join(resolved_attachments) if resolved_attachments else None
         
         vk.wall.post(
             owner_id=target_id,

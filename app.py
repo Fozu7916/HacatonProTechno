@@ -15,6 +15,12 @@ st.set_page_config(page_title="VK Volunteer Panel", layout="wide")
 
 st.title("📱 Панель управления контентом")
 
+ATTACHMENT_TYPES = [
+    "png", "jpg", "jpeg", "webp", "gif",
+    "mp4", "mov", "avi", "mkv",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "zip", "rar",
+]
+
 
 def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редактор") -> str:
     """
@@ -44,7 +50,8 @@ def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редакто
                 "role": "system",
                 "content": (
                     "Ты опытный редактор соцсетей молодёжного центра. "
-                    "Пиши живо, структурно, без канцелярита, на русском языке."
+                    "Пиши живо, структурно, без канцелярита, на русском языке. "
+                    "Добавляй уместные эмодзи (2-6 штук по тексту), без перегруза."
                 ),
             },
             {
@@ -165,6 +172,42 @@ def build_excel_report(report_data: dict) -> bytes:
 
     return output.getvalue()
 
+
+def render_emoji_toolbar(target_key: str, toolbar_key: str):
+    """Emoji picker в выпадающем окне с категориями."""
+    emoji_groups = {
+        "Популярные": ["🔥", "✨", "🎉", "📢", "📅", "📍", "💙", "✅", "🚀", "🤝", "💡", "🎓", "❤️", "👏", "🙏", "🌟"],
+        "Эмоции": ["😀", "😁", "😂", "🤣", "😊", "😍", "😘", "😎", "🤗", "🤔", "😴", "😭", "😡", "🥳", "🤩", "😇"],
+        "События": ["🎊", "🎈", "🎁", "🎤", "🎬", "🎵", "🏆", "🥇", "📸", "🎯", "🧩", "🎨", "🎭", "🎪", "🏅", "🎟️"],
+        "Люди": ["👩‍💻", "🧑‍💻", "👨‍🏫", "🧑‍🎓", "🙌", "👏", "🤝", "💬", "🫶", "🧠", "💪", "🫡", "👥", "🗣️", "🧑‍🤝‍🧑", "✍️"],
+        "Объявления": ["📢", "📣", "📰", "🗓️", "🕒", "📌", "📝", "📍", "🔔", "⚡", "❗", "✅", "📎", "🔗", "📊", "📈"],
+        "Природа": ["🌞", "🌈", "🌿", "🌸", "🍀", "🌍", "🌊", "🌙", "⭐", "☀️", "🍁", "🌱", "🌼", "🌻", "🌺", "❄️"],
+    }
+
+    with st.popover("😊 Эмодзи"):
+        tabs = st.tabs(list(emoji_groups.keys()))
+        for tab_name, tab in zip(emoji_groups.keys(), tabs):
+            with tab:
+                emojis = emoji_groups[tab_name]
+                cols = st.columns(8)
+                for i, emj in enumerate(emojis):
+                    with cols[i % 8]:
+                        if st.button(emj, key=f"{toolbar_key}_{tab_name}_{i}"):
+                            st.session_state[f"{toolbar_key}__pending_emoji"] = emj
+                            st.rerun()
+
+
+def apply_pending_emoji(target_key: str, toolbar_key: str):
+    """
+    Безопасно добавляет эмодзи к тексту ДО создания text_area с этим key.
+    Это обходит ограничение Streamlit на изменение state после инстанцирования виджета.
+    """
+    pending_key = f"{toolbar_key}__pending_emoji"
+    if pending_key in st.session_state and st.session_state[pending_key]:
+        current_text = st.session_state.get(target_key, "")
+        st.session_state[target_key] = f"{current_text}{st.session_state[pending_key]}"
+        st.session_state[pending_key] = ""
+
 # Инициализация БД при первом запуске
 if st.sidebar.button("Инициализировать БД"):
     from database.db import init_db
@@ -227,7 +270,7 @@ if role == "Руководитель":
             chart_cols = st.columns(2)
             with chart_cols[0]:
                 st.caption("Охват и лайки по датам")
-                st.line_chart(report_data["chart_data"], use_container_width=True)
+                st.line_chart(report_data["chart_data"], width="stretch")
             with chart_cols[1]:
                 st.caption("Суммарные метрики за период")
                 summary_df = pd.DataFrame(
@@ -241,10 +284,10 @@ if role == "Руководитель":
                         ],
                     }
                 )
-                st.bar_chart(summary_df.set_index("Показатель"), use_container_width=True)
+                st.bar_chart(summary_df.set_index("Показатель"), width="stretch")
 
             st.markdown("### 📅 Ежедневная статистика")
-            st.dataframe(report_data["daily_stats"], use_container_width=True)
+            st.dataframe(report_data["daily_stats"], width="stretch")
 
             st.markdown("### 🏆 Топ-3 лучших поста")
             st.subheader("🏆 Топ-3 лучших поста за период")
@@ -265,7 +308,7 @@ if role == "Руководитель":
                         data=pdf_bytes,
                         file_name="report.pdf",
                         mime="application/pdf",
-                        use_container_width=True,
+                        width="stretch",
                     )
             except Exception as e:
                 st.error(f"Ошибка генерации PDF: {e}")
@@ -277,7 +320,7 @@ if role == "Руководитель":
                         data=excel_bytes,
                         file_name="report.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+                        width="stretch",
                     )
             except Exception as e:
                 st.error(f"Ошибка генерации Excel: {e}")
@@ -326,8 +369,24 @@ if role != "Руководитель":
             smm_mode = st.radio("Режим создания", ["Свободный текст", "Создание афиши по шаблону"])
             
             if smm_mode == "Свободный текст":
+                apply_pending_emoji("smm_text", "emoji_smm_free")
                 smm_text = st.text_area("Текст официального поста", height=150, key="smm_text")
-                smm_uploaded_file = st.file_uploader("Прикрепите фото", type=['png', 'jpg', 'jpeg'], key="smm_photo_free")
+                render_emoji_toolbar("smm_text", "emoji_smm_free")
+                if st.button("🤖 Сгенерировать текст ИИ (смайлики)"):
+                    try:
+                        ai_prompt = f"Напиши пост для VK на тему:\n{smm_text or 'Анонс мероприятия молодёжного центра'}"
+                        ai_text = generate_text_with_ai(ai_prompt, role_hint="СММ-специалист")
+                        st.session_state["smm_text"] = ai_text
+                        st.success("ИИ-текст сгенерирован")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Ошибка ИИ-генерации: {e}")
+                smm_uploaded_file = st.file_uploader(
+                    "Прикрепите вложения (фото/видео/документы)",
+                    type=ATTACHMENT_TYPES,
+                    accept_multiple_files=True,
+                    key="smm_photo_free"
+                )
             else:
                 from database.db import get_templates
                 templates = get_templates()
@@ -372,16 +431,23 @@ if role != "Руководитель":
                     
                     if "smm_text_afisha_area" not in st.session_state:
                         st.session_state["smm_text_afisha_area"] = st.session_state.get("generated_smm_text", "")
+                    apply_pending_emoji("smm_text_afisha_area", "emoji_smm_afisha")
                     smm_text = st.text_area(
                         "Текст афиши (на основе шаблона)",
                         height=150,
                         key="smm_text_afisha_area"
                     )
-                    smm_uploaded_file = st.file_uploader("Прикрепите фото афиши", type=['png', 'jpg', 'jpeg'], key="smm_photo_afisha")
+                    render_emoji_toolbar("smm_text_afisha_area", "emoji_smm_afisha")
+                    smm_uploaded_file = st.file_uploader(
+                        "Прикрепите вложения афиши (фото/видео/документы)",
+                        type=ATTACHMENT_TYPES,
+                        accept_multiple_files=True,
+                        key="smm_photo_afisha"
+                    )
                 else:
                     st.warning("Нет доступных шаблонов.")
                     smm_text = ""
-                    smm_uploaded_file = None
+                    smm_uploaded_file = []
 
             col_date, col_hour, col_min, col_btn = st.columns([1.5, 1, 1, 1.5])
             with col_date:
@@ -398,25 +464,30 @@ if role != "Руководитель":
                 st.write(" ")
                 if st.button("В очередь"):
                     if smm_text:
-                        smm_photo = None
+                        smm_attachments = None
                         if smm_uploaded_file:
                             try:
-                                from parser.vk_parser import upload_photo
-                                import vk_api
-                                vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
-                                smm_photo = upload_photo(vk, smm_uploaded_file)
+                                if not os.path.exists("uploads"):
+                                    os.makedirs("uploads")
+                                files_saved = []
+                                for fobj in smm_uploaded_file:
+                                    file_path = os.path.join("uploads", f"{int(time.time())}_{fobj.name}")
+                                    with open(file_path, "wb") as fw:
+                                        fw.write(fobj.getbuffer())
+                                    files_saved.append(file_path)
+                                smm_attachments = ",".join(files_saved) if files_saved else None
                             except Exception as e:
-                                st.error(f"Ошибка загрузки фото: {e}")
+                                st.error(f"Ошибка подготовки вложений: {e}")
                         
                         from database.db import add_to_queue
-                        add_to_queue(None, smm_text, priority=5, er=0.0, scheduled_at=scheduled_at, attachments=smm_photo)
+                        add_to_queue(None, smm_text, priority=5, er=0.0, scheduled_at=scheduled_at, attachments=smm_attachments)
                         
                         # СММ посты сразу получают статус 'ready', им не нужно одобрение редактора
                         conn = get_connection(); cur = conn.cursor()
                         cur.execute("UPDATE post_queue SET status = 'ready', author_role = 'smm' WHERE suggested_text = %s ORDER BY created_at DESC LIMIT 1", (smm_text,))
                         conn.commit(); cur.close(); conn.close()
                         
-                        st.success(f"Запланировано на {scheduled_at.strftime('%d.%m %H:%M')}")
+                        st.success(f"Запланировано на {scheduled_at.strftime('%d.%m %H:%M')} ✅")
                     else:
                         st.error("Текст пуст!")
 
@@ -446,24 +517,25 @@ if role != "Руководитель":
                 
                 st.info(f"Текст волонтера:\n{current_row['suggested_text']}")
                 if current_row['attachments']:
-                    st.write(f"Вложение: {current_row['attachments']}")
-                    # Если это локальный путь, показываем напрямую
-                    if os.path.exists(str(current_row['attachments'])):
-                        st.image(current_row['attachments'], caption="Предпросмотр (локально)", width=400)
-                    else:
-                        try:
-                            from parser.vk_parser import get_photo_url
-                            import vk_api
-                            vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
-                            img_url = get_photo_url(vk, current_row['attachments'])
-                            if img_url:
-                                st.image(img_url, caption="Прикрепленное фото", width=400)
+                    attachments_items = [a.strip() for a in str(current_row['attachments']).split(",") if a.strip()]
+                    st.write("Вложения:")
+                    for att in attachments_items:
+                        st.code(att)
+                        if os.path.exists(att):
+                            if att.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                                st.image(att, caption="Предпросмотр (локально)", width=400)
                             else:
-                                vk_link = f"https://vk.com/{current_row['attachments']}"
-                                st.warning("Не удалось загрузить предпросмотр. Посмотрите фото по ссылке:")
-                                st.link_button("🔗 Открыть фото в VK", vk_link)
-                        except Exception as e:
-                            st.warning(f"Не удалось загрузить предпросмотр фото: {e}")
+                                st.caption("Локальный файл (не изображение)")
+                        elif att.startswith("photo"):
+                            try:
+                                from parser.vk_parser import get_photo_url
+                                import vk_api
+                                vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
+                                img_url = get_photo_url(vk, att)
+                                if img_url:
+                                    st.image(img_url, caption="Прикрепленное фото", width=400)
+                            except Exception:
+                                pass
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -527,12 +599,18 @@ if role != "Руководитель":
 
                 if "vol_text_area_final" not in st.session_state:
                     st.session_state["vol_text_area_final"] = st.session_state.get("generated_vol_text", "")
+                apply_pending_emoji("vol_text_area_final", "emoji_vol_final")
                 final_text = st.text_area(
                     "Итоговый текст (можно подправить)",
                     height=200,
                     key="vol_text_area_final"
                 )
-                uploaded_file = st.file_uploader("Прикрепите фото", type=['png', 'jpg', 'jpeg'])
+                render_emoji_toolbar("vol_text_area_final", "emoji_vol_final")
+                uploaded_file = st.file_uploader(
+                    "Прикрепите вложения (фото/видео/документы)",
+                    type=ATTACHMENT_TYPES,
+                    accept_multiple_files=True
+                )
                 
                 if st.button("Отправить на проверку"):
                     if final_text:
@@ -541,10 +619,13 @@ if role != "Руководитель":
                             # Сохраняем локально для предпросмотра
                             import os
                             if not os.path.exists("uploads"): os.makedirs("uploads")
-                            file_path = os.path.join("uploads", f"{int(time.time())}_{uploaded_file.name}")
-                            with open(file_path, "wb") as f:
-                                f.write(uploaded_file.getbuffer())
-                            attachments = file_path # Сохраняем путь к локальному файлу
+                            files_saved = []
+                            for fobj in uploaded_file:
+                                file_path = os.path.join("uploads", f"{int(time.time())}_{fobj.name}")
+                                with open(file_path, "wb") as f:
+                                    f.write(fobj.getbuffer())
+                                files_saved.append(file_path)
+                            attachments = ",".join(files_saved) if files_saved else None
                         
                         from database.db import add_to_queue
                         add_to_queue(None, final_text, priority=2, er=0.0, attachments=attachments)
