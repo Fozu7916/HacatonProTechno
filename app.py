@@ -205,8 +205,6 @@ def publish_poll_to_vk(
     if len(clean_opts) < 2:
         return 0, len(group_ids or []), ["Недостаточно вариантов для опроса"]
 
-    message = "🧠 Викторина" if is_quiz else ""
-
     success = 0
     failed = 0
     errors = []
@@ -218,27 +216,41 @@ def publish_poll_to_vk(
     for gid in group_ids or []:
         try:
             owner_id = -int(str(gid).strip().replace("-", ""))
-            poll = None
-            # Нативный опрос VK
-            try:
-                poll = vk.polls.create(
-                    owner_id=owner_id,
-                    question=question.strip()[:255],
-                    is_anonymous=0,
-                    add_answers=json.dumps(clean_opts, ensure_ascii=False),
-                )
-            except Exception:
-                # Fallback: создаем опрос от пользователя и прикрепляем к посту группы
-                poll = vk.polls.create(
-                    question=question.strip()[:255],
-                    is_anonymous=0,
-                    add_answers=json.dumps(clean_opts, ensure_ascii=False),
-                )
+            
+            # Подготавливаем варианты ответов
+            answers = []
+            for i, opt in enumerate(clean_opts):
+                answer_text = opt[:255]
+                # Если это викторина и это правильный ответ, добавляем маркер
+                if is_quiz and i == correct_option_id:
+                    answer_text = f"✅ {answer_text}"
+                answers.append(answer_text)
+            
+            # Создаём опрос
+            poll_params = {
+                "owner_id": owner_id,
+                "question": question.strip()[:255],
+                "is_anonymous": 0,
+                "add_answers": json.dumps(answers, ensure_ascii=False),
+            }
+            
+            # Если это викторина, добавляем флаг
+            if is_quiz:
+                poll_params["is_quiz"] = 1
+            
+            poll = vk.polls.create(**poll_params)
+            
             poll_owner = poll.get("owner_id")
             poll_id = poll.get("id")
             if not poll_owner or not poll_id:
                 raise ValueError("Не удалось создать VK-опрос")
+            
             attachment = f"poll{poll_owner}_{poll_id}"
+            
+            # Формируем сообщение (VK требует хотя бы text или attachment)
+            message = "🧠 Викторина" if is_quiz else "📊 Опрос"
+            
+            # Публикуем опрос в группе
             vk.wall.post(
                 owner_id=owner_id,
                 from_group=1,
@@ -248,7 +260,7 @@ def publish_poll_to_vk(
             success += 1
         except Exception as e:
             failed += 1
-            errors.append(f"Группа {gid}: {e}")
+            errors.append(f"Группа {gid}: {str(e)[:100]}")
     return success, failed, errors
 
 
