@@ -7,7 +7,17 @@ import io
 from datetime import datetime
 from streamlit_calendar import calendar
 from custom_calendar import queue_calendar_popup_component
-from database.db import get_connection, init_db, get_setting, set_setting, add_template, get_templates, add_to_queue
+from database.db import (
+    get_connection,
+    init_db,
+    get_setting,
+    set_setting,
+    add_template,
+    get_templates,
+    add_to_queue,
+    create_user,
+    authenticate_user,
+)
 from analytics.stats import get_dry_stats
 from analytics.processor import process_incoming_post
 from publisher.scheduler import publish_next_post
@@ -220,7 +230,49 @@ if st.sidebar.button("Инициализировать БД"):
 
 # --- БОКОВАЯ ПАНЕЛЬ ---
 st.sidebar.header("👤 Авторизация")
-role = st.sidebar.selectbox("Выберите роль", ["Волонтер", "Редактор", "СММ-специалист", "Руководитель"])
+if "auth_user" not in st.session_state:
+    st.session_state["auth_user"] = None
+
+if st.session_state["auth_user"] is None:
+    auth_mode = st.sidebar.radio("Режим", ["Вход", "Регистрация"], horizontal=True)
+    if auth_mode == "Вход":
+        email_in = st.sidebar.text_input("Почта", key="login_email")
+        pass_in = st.sidebar.text_input("Пароль", type="password", key="login_password")
+        if st.sidebar.button("Войти"):
+            user = authenticate_user(email_in.strip(), pass_in)
+            if user:
+                st.session_state["auth_user"] = user
+                st.sidebar.success(f"Добро пожаловать, {user['full_name']} ({user['code']})")
+                st.rerun()
+            else:
+                st.sidebar.error("Неверная почта или пароль")
+    else:
+        reg_name = st.sidebar.text_input("ФИО", key="reg_full_name")
+        reg_email = st.sidebar.text_input("Почта", key="reg_email")
+        reg_password = st.sidebar.text_input("Пароль", type="password", key="reg_password")
+        reg_role = st.sidebar.selectbox(
+            "Роль",
+            ["Наблюдатель", "Руководитель", "Администратор", "Редактор", "Волонтер", "СММ"],
+            key="reg_role",
+        )
+        if st.sidebar.button("Зарегистрироваться"):
+            try:
+                code = create_user(reg_name.strip(), reg_email.strip(), reg_password, reg_role)
+                st.sidebar.success(f"Пользователь создан: {code}. Теперь войдите.")
+            except Exception as e:
+                st.sidebar.error(f"Ошибка регистрации: {e}")
+    st.warning("Войдите в систему для работы с платформой.")
+    st.stop()
+
+auth_user = st.session_state["auth_user"]
+role = auth_user["role"]
+if role in ["СММ", "СММ-специалист"]:
+    role = "СММ"
+user_code = auth_user["code"]
+st.sidebar.caption(f"Пользователь: {auth_user['full_name']} ({user_code})")
+if st.sidebar.button("Выйти"):
+    st.session_state["auth_user"] = None
+    st.rerun()
 
 st.sidebar.header("⚙️ Управление")
 # Слайдер теперь от 1 поста
@@ -236,8 +288,8 @@ if st.sidebar.button("🔄 Обновить данные из VK"):
     st.sidebar.success("Обновлено!")
     st.rerun()
 
-# Настройки и отчеты только для Руководителя
-if role == "Руководитель":
+# Настройки и отчеты для руководителя/наблюдателя/админа
+if role in ["Руководитель", "Наблюдатель", "Администратор"]:
     st.sidebar.header("🔑 Панель Руководителя")
     
     report_days = st.sidebar.number_input("Период отчета (дней)", 1, 365, 7)
@@ -331,7 +383,11 @@ if stats:
         st.sidebar.metric(key, val)
 
 # --- ОСНОВНАЯ ОБЛАСТЬ ---
-if role == "Руководитель":
+if role == "Наблюдатель":
+    tab_list = ["📈 Архив"]
+    tabs = st.tabs(tab_list)
+    tab_a = tabs[0]
+elif role in ["Руководитель"]:
     tab_list = ["📅 Очередь", "📈 Архив"]
     tabs = st.tabs(tab_list)
     tab_q, tab_a = tabs[0], tabs[1]
@@ -341,9 +397,17 @@ else:
     tab_r, tab_q, tab_a = tabs[0], tabs[1], tabs[2]
 
 # Логика вкладки Редактор (только если она есть)
-if role != "Руководитель":
+if role not in ["Руководитель", "Наблюдатель"]:
     with tab_r:
-        if role == "СММ-специалист":
+        active_creator_role = role
+        if role == "Администратор":
+            active_creator_role = st.radio(
+                "Режим администратора",
+                ["СММ", "Редактор"],
+                horizontal=True,
+            )
+
+        if active_creator_role == "СММ":
             st.header("🚀 Панель СММ")
             
             # Блок рекомендаций на основе аналитики
@@ -375,7 +439,7 @@ if role != "Руководитель":
                 if st.button("🤖 Сгенерировать текст ИИ (смайлики)"):
                     try:
                         ai_prompt = f"Напиши пост для VK на тему:\n{smm_text or 'Анонс мероприятия молодёжного центра'}"
-                        ai_text = generate_text_with_ai(ai_prompt, role_hint="СММ-специалист")
+                        ai_text = generate_text_with_ai(ai_prompt, role_hint="СММ")
                         st.session_state["smm_text"] = ai_text
                         st.success("ИИ-текст сгенерирован")
                         st.rerun()
@@ -421,7 +485,7 @@ if role != "Руководитель":
                             ai_prompt += f"- {tag}: {val}\n"
                         ai_prompt += f"\nЧерновик по шаблону:\n{draft_text}"
                         try:
-                            ai_text = generate_text_with_ai(ai_prompt, role_hint="СММ-специалист")
+                            ai_text = generate_text_with_ai(ai_prompt, role_hint="СММ")
                             st.session_state['generated_smm_text'] = ai_text
                             st.session_state['smm_text_afisha_area'] = ai_text
                             st.success("ИИ-текст сгенерирован")
@@ -480,19 +544,78 @@ if role != "Руководитель":
                                 st.error(f"Ошибка подготовки вложений: {e}")
                         
                         from database.db import add_to_queue
-                        add_to_queue(None, smm_text, priority=5, er=0.0, scheduled_at=scheduled_at, attachments=smm_attachments)
+                        smm_title = smm_text.splitlines()[0][:255] if smm_text else "Без заголовка"
+                        add_to_queue(
+                            None,
+                            smm_text,
+                            priority=5,
+                            er=0.0,
+                            scheduled_at=scheduled_at,
+                            attachments=smm_attachments,
+                            title=smm_title,
+                            author_code=user_code,
+                            approver_code=user_code,
+                        )
                         
                         # СММ посты сразу получают статус 'ready', им не нужно одобрение редактора
                         conn = get_connection(); cur = conn.cursor()
-                        cur.execute("UPDATE post_queue SET status = 'ready', author_role = 'smm' WHERE suggested_text = %s ORDER BY created_at DESC LIMIT 1", (smm_text,))
+                        cur.execute(
+                            "UPDATE post_queue SET status = 'ready', author_role = 'smm', author_code = %s, approver_code = %s WHERE suggested_text = %s ORDER BY created_at DESC LIMIT 1",
+                            (user_code, user_code, smm_text),
+                        )
                         conn.commit(); cur.close(); conn.close()
                         
                         st.success(f"Запланировано на {scheduled_at.strftime('%d.%m %H:%M')} ✅")
                     else:
                         st.error("Текст пуст!")
 
-        elif role == "Редактор":
+        elif active_creator_role == "Редактор":
             st.header("🛠 Управление контентом (Редактор)")
+
+            # 0. Создание поста редактором (новое требование)
+            st.subheader("✍️ Создать пост (Редактор)")
+            editor_title = st.text_input("Заголовок публикации", key="editor_post_title")
+            editor_text = st.text_area("Текст публикации", key="editor_post_text", height=130)
+            editor_files = st.file_uploader(
+                "Вложения (фото/видео/документы)",
+                type=ATTACHMENT_TYPES,
+                accept_multiple_files=True,
+                key="editor_post_files",
+            )
+            if st.button("Опубликовать/в очередь от редактора"):
+                if editor_text.strip():
+                    attachments = None
+                    if editor_files:
+                        if not os.path.exists("uploads"):
+                            os.makedirs("uploads")
+                        saved = []
+                        for fobj in editor_files:
+                            fpath = os.path.join("uploads", f"{int(time.time())}_{fobj.name}")
+                            with open(fpath, "wb") as fw:
+                                fw.write(fobj.getbuffer())
+                            saved.append(fpath)
+                        attachments = ",".join(saved) if saved else None
+                    add_to_queue(
+                        None,
+                        editor_text,
+                        priority=4,
+                        er=0.0,
+                        attachments=attachments,
+                        title=editor_title or (editor_text.splitlines()[0][:255] if editor_text else "Без заголовка"),
+                        author_code=user_code,
+                        approver_code=user_code,
+                    )
+                    conn = get_connection(); cur = conn.cursor()
+                    cur.execute(
+                        "UPDATE post_queue SET status='ready', author_role='smm' WHERE id = LAST_INSERT_ID()"
+                    )
+                    conn.commit(); cur.close(); conn.close()
+                    st.success("Пост редактора добавлен в ready")
+                    st.rerun()
+                else:
+                    st.error("Введите текст публикации")
+
+            st.divider()
             
             # 1. Создание шаблонов
             st.subheader("📝 Создание шаблонов")
@@ -512,10 +635,22 @@ if role != "Руководитель":
             conn.close()
             
             if not to_edit.empty:
-                post_to_fix = st.selectbox("Выберите пост для проверки", to_edit['id'])
+                editor_options = []
+                for _, row in to_edit.iterrows():
+                    title = str(row.get("title") or "").strip() or str(row.get("suggested_text") or "").splitlines()[0][:80]
+                    if len(title) > 80:
+                        title = title[:80] + "..."
+                    editor_options.append((int(row["id"]), title or "Без заголовка"))
+                post_to_fix = st.selectbox(
+                    "Выберите пост для проверки",
+                    options=[i for i, _ in editor_options],
+                    format_func=lambda pid: next((t for i, t in editor_options if i == pid), f"Пост #{pid}"),
+                )
                 current_row = to_edit[to_edit['id'] == post_to_fix].iloc[0]
-                
-                st.info(f"Текст волонтера:\n{current_row['suggested_text']}")
+
+                st.info(f"Заголовок: {next((t for i, t in editor_options if i == post_to_fix), 'Без заголовка')}")
+                with st.expander("Показать полный текст поста"):
+                    st.write(current_row['suggested_text'] or "Без текста")
                 if current_row['attachments']:
                     attachments_items = [a.strip() for a in str(current_row['attachments']).split(",") if a.strip()]
                     st.write("Вложения:")
@@ -541,7 +676,10 @@ if role != "Руководитель":
                 with col1:
                     if st.button("✅ Одобрить (в очередь)"):
                         conn = get_connection(); cur = conn.cursor()
-                        cur.execute("UPDATE post_queue SET status = 'ready', priority = 3 WHERE id = %s", (post_to_fix,))
+                        cur.execute(
+                            "UPDATE post_queue SET status = 'ready', priority = 3, approver_code = %s WHERE id = %s",
+                            (user_code, post_to_fix),
+                        )
                         conn.commit(); cur.close(); conn.close()
                         st.success("Пост одобрен!"); st.rerun()
                 with col2:
@@ -628,7 +766,16 @@ if role != "Руководитель":
                             attachments = ",".join(files_saved) if files_saved else None
                         
                         from database.db import add_to_queue
-                        add_to_queue(None, final_text, priority=2, er=0.0, attachments=attachments)
+                        vol_title = final_text.splitlines()[0][:255] if final_text else "Без заголовка"
+                        add_to_queue(
+                            None,
+                            final_text,
+                            priority=2,
+                            er=0.0,
+                            attachments=attachments,
+                            title=vol_title,
+                            author_code=user_code,
+                        )
                         
                         conn = get_connection(); cur = conn.cursor()
                         cur.execute("UPDATE post_queue SET status = 'editing' WHERE suggested_text = %s ORDER BY created_at DESC LIMIT 1", (final_text,))
@@ -646,13 +793,13 @@ if role != "Руководитель":
 
     st.markdown("---")
     # Кнопка публикации только для СММ и Руководителя
-    if role in ["СММ-специалист", "Руководитель"]:
+    if role in ["СММ", "Руководитель", "Администратор"]:
         if st.button("🚀 Опубликовать следующий по приоритету"):
             publish_next_post()
             st.rerun()
 
 with tab_q:
-    if role in ["СММ-специалист", "Руководитель"]:
+    if role in ["СММ", "Руководитель", "Администратор"]:
         st.header("📅 План публикаций")
         st.markdown(f"## {datetime.now().strftime('%B %Y').capitalize()}")
     else:
@@ -666,7 +813,7 @@ with tab_q:
         queue_data["scheduled_at"] = pd.to_datetime(queue_data["scheduled_at"], errors="coerce")
 
     # 1. Кастомный календарь с popover над клеткой для редактора, СММ и руководителя
-    if role in ["Редактор", "СММ-специалист", "Руководитель"]:
+    if role in ["Редактор", "СММ", "Руководитель", "Администратор"]:
         st.subheader("Визуальный календарь (Popup)")
         posts_payload = []
         if not queue_data.empty:
@@ -748,7 +895,35 @@ with tab_q:
 with tab_a:
     st.header("Архив постов из VK")
     conn = get_connection()
-    archive_df = pd.read_sql("SELECT date, text, likes, views, er FROM (SELECT *, (likes+reposts+comments)/NULLIF(views,0)*100 as er FROM posts) t ORDER BY date DESC LIMIT 50", conn)
+    archive_df = pd.read_sql(
+        """
+        SELECT
+            q.created_at AS date,
+            q.title AS `Заголовок публикации`,
+            q.author_code AS `Автор`,
+            q.approver_code AS `Кто выпустил`,
+            q.suggested_text AS text,
+            NULL AS likes,
+            NULL AS views,
+            NULL AS er
+        FROM post_queue q
+        WHERE q.status = 'posted'
+        UNION ALL
+        SELECT
+            p.date AS date,
+            LEFT(COALESCE(p.text, 'Без заголовка'), 120) AS `Заголовок публикации`,
+            NULL AS `Автор`,
+            NULL AS `Кто выпустил`,
+            p.text AS text,
+            p.likes AS likes,
+            p.views AS views,
+            (p.likes+p.reposts+p.comments)/NULLIF(p.views,0)*100 AS er
+        FROM posts p
+        ORDER BY date DESC
+        LIMIT 80
+        """,
+        conn,
+    )
     conn.close()
     st.dataframe(archive_df, width='stretch')
 

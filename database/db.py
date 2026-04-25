@@ -1,5 +1,6 @@
 import mysql.connector
 import os
+import hashlib
 from dotenv import load_dotenv
 
 # Загружаем .env из корня (на два уровня выше)
@@ -52,10 +53,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS post_queue (
             id            INT AUTO_INCREMENT PRIMARY KEY,
             post_id       INT,
+            title         VARCHAR(255),
             suggested_text TEXT,
             attachments   TEXT,
             priority      INT DEFAULT 1,
             author_role   ENUM('smm', 'volunteer') DEFAULT 'volunteer',
+            author_code   VARCHAR(20),
+            approver_code VARCHAR(20),
             scheduled_at  DATETIME DEFAULT NULL,
             predicted_er  FLOAT,
             status        ENUM('pending', 'editing', 'ready', 'posted') DEFAULT 'pending',
@@ -80,6 +84,30 @@ def init_db():
         )
     """)
     cursor.execute("INSERT IGNORE INTO settings (`key`, `value`) VALUES ('posts_per_day', '3')")
+
+    # Таблица пользователей
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id            INT AUTO_INCREMENT PRIMARY KEY,
+            code          VARCHAR(20) UNIQUE,
+            full_name     VARCHAR(255) NOT NULL,
+            email         VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            role          VARCHAR(50) NOT NULL,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Мягкая миграция для старых БД
+    for col_sql in [
+        "ALTER TABLE post_queue ADD COLUMN title VARCHAR(255)",
+        "ALTER TABLE post_queue ADD COLUMN author_code VARCHAR(20)",
+        "ALTER TABLE post_queue ADD COLUMN approver_code VARCHAR(20)",
+    ]:
+        try:
+            cursor.execute(col_sql)
+        except Exception:
+            pass
 
     conn.commit()
     cursor.close()
@@ -159,14 +187,82 @@ def upsert_comment(comment: dict, post_id: int):
     cursor.close()
     conn.close()
 
-def add_to_queue(post_id: int, text: str, priority: int, er: float, scheduled_at: datetime = None, attachments: str = None):
+def add_to_queue(
+    post_id: int,
+    text: str,
+    priority: int,
+    er: float,
+    scheduled_at: datetime = None,
+    attachments: str = None,
+    title: str = None,
+    author_code: str = None,
+    approver_code: str = None,
+):
     """Добавляет пост в очередь на публикацию."""
+    title_val = title or ((text or "").splitlines()[0][:255] if text else "Без заголовка")
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO post_queue (post_id, suggested_text, priority, predicted_er, scheduled_at, attachments)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (post_id, text, priority, er, scheduled_at, attachments))
+        INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code))
     conn.commit()
     cursor.close()
     conn.close()
+
+
+def _role_prefix(role: str) -> str:
+    mapping = {
+        "Руководитель": "R",
+        "Администратор": "A",
+        "Редактор": "R",
+        "Волонтер": "B",
+        "СММ-специалист": "C",
+        "СММ": "C",
+        "Наблюдатель": "N",
+    }
+    return mapping.get(role, "U")
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def create_user(full_name: str, email: str, password: str, role: str):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    prefix = _role_prefix(role)
+    cursor.execute("SELECT COUNT(*) as c FROM users WHERE role = %s", (role,))
+    count = int(cursor.fetchone()["c"]) + 1
+    code = f"{prefix}{count}"
+    try:
+        cursor.execute(
+            "INSERT INTO users (code, full_name, email, password_hash, role) VALUES (%s, %s, %s, %s, %s)",
+            (code, full_name, email, _hash_password(password), role),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        cursor.close()
+        conn.close()
+    return code
+
+
+def authenticate_user(email: str, password: str):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        "SELECT id, code, full_name, email, role, password_hash FROM users WHERE email = %s",
+        (email,),
+    )
+    user = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    if not user:
+        return None
+    if user["password_hash"] != _hash_password(password):
+        return None
+    user.pop("password_hash", None)
+    return user
