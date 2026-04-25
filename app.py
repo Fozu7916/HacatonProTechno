@@ -290,6 +290,9 @@ if st.session_state["auth_user"] is None:
         )
         if st.sidebar.button("Зарегистрироваться"):
             try:
+                reg_email_clean = (reg_email or "").strip()
+                if "@" not in reg_email_clean:
+                    raise ValueError("Почта должна содержать символ @")
                 create_pending_registration(reg_name.strip(), reg_email.strip(), reg_password, reg_role)
                 st.sidebar.success("✅ Заявка отправлена! Ожидайте одобрения администратора.")
             except Exception as e:
