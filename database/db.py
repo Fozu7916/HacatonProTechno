@@ -98,6 +98,21 @@ def init_db():
         )
     """)
 
+    # Таблица ожидающих регистраций
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pending_registrations (
+            id            INT AUTO_INCREMENT PRIMARY KEY,
+            full_name     VARCHAR(255) NOT NULL,
+            email         VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            role          VARCHAR(50) NOT NULL,
+            status        ENUM('pending', 'approved', 'rejected') DEFAULT 'pending',
+            rejection_reason VARCHAR(500),
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at   DATETIME,
+            reviewed_by   VARCHAR(20)
+        )
+    """)
     # Мягкая миграция для старых БД
     for col_sql in [
         "ALTER TABLE post_queue ADD COLUMN title VARCHAR(255)",
@@ -354,6 +369,96 @@ def update_user_credentials(email: str, new_password: str = None, new_email: str
                 "UPDATE users SET email = %s WHERE email = %s",
                 (new_email, email),
             )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise e
+
+
+def create_pending_registration(full_name: str, email: str, password: str, role: str):
+    """Создает заявку на регистрацию, требующую одобрения администратора."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO pending_registrations (full_name, email, password_hash, role) VALUES (%s, %s, %s, %s)",
+            (full_name, email, _hash_password(password), role),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise e
+
+
+def get_pending_registrations():
+    """Получает все ожидающие регистрации."""
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM pending_registrations WHERE status = 'pending' ORDER BY created_at DESC")
+    res = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return res
+
+
+def approve_registration(registration_id: int, admin_code: str):
+    """Одобряет регистрацию и создает пользователя."""
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Получаем данные заявки
+        cursor.execute("SELECT * FROM pending_registrations WHERE id = %s", (registration_id,))
+        reg = cursor.fetchone()
+        if not reg:
+            raise ValueError("Заявка не найдена")
+        
+        # Создаем пользователя
+        prefix = _role_prefix(reg["role"])
+        cursor.execute("SELECT COUNT(*) as c FROM users WHERE role = %s", (reg["role"],))
+        count = int(cursor.fetchone()["c"]) + 1
+        code = f"{prefix}{count}"
+        
+        cursor.execute(
+            "INSERT INTO users (code, full_name, email, password_hash, role) VALUES (%s, %s, %s, %s, %s)",
+            (code, reg["full_name"], reg["email"], reg["password_hash"], reg["role"]),
+        )
+        
+        # Обновляем статус заявки
+        cursor.execute(
+            "UPDATE pending_registrations SET status = %s, reviewed_at = NOW(), reviewed_by = %s WHERE id = %s",
+            ("approved", admin_code, registration_id),
+        )
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return code
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        raise e
+
+
+def reject_registration(registration_id: int, admin_code: str, reason: str = ""):
+    """Отклоняет регистрацию."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE pending_registrations SET status = %s, rejection_reason = %s, reviewed_at = NOW(), reviewed_by = %s WHERE id = %s",
+            ("rejected", reason, admin_code, registration_id),
+        )
         conn.commit()
         cursor.close()
         conn.close()

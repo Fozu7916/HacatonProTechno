@@ -18,6 +18,10 @@ from database.db import (
     create_user,
     authenticate_user,
     update_user_credentials,
+    create_pending_registration,
+    get_pending_registrations,
+    approve_registration,
+    reject_registration,
 )
 from analytics.stats import get_dry_stats
 from analytics.processor import process_incoming_post
@@ -258,8 +262,8 @@ if st.session_state["auth_user"] is None:
         )
         if st.sidebar.button("Зарегистрироваться"):
             try:
-                code = create_user(reg_name.strip(), reg_email.strip(), reg_password, reg_role)
-                st.sidebar.success(f"Пользователь создан: {code}. Теперь войдите.")
+                create_pending_registration(reg_name.strip(), reg_email.strip(), reg_password, reg_role)
+                st.sidebar.success("✅ Заявка отправлена! Ожидайте одобрения администратора.")
             except Exception as e:
                 st.sidebar.error(f"Ошибка регистрации: {e}")
     st.warning("Войдите в систему для работы с платформой.")
@@ -453,10 +457,72 @@ elif role in ["Руководитель"]:
     tab_list = ["📅 Очередь", "📈 Архив"]
     tabs = st.tabs(tab_list)
     tab_q, tab_a = tabs[0], tabs[1]
+elif role == "Администратор":
+    tab_list = ["� Регистрации", "� Редактор", "📅 Очередь", "📈 Архив"]
+    tabs = st.tabs(tab_list)
+    tab_reg, tab_r, tab_q, tab_a = tabs[0], tabs[1], tabs[2], tabs[3]
 else:
     tab_list = ["📝 Редактор", "📅 Очередь", "📈 Архив"]
     tabs = st.tabs(tab_list)
     tab_r, tab_q, tab_a = tabs[0], tabs[1], tabs[2]
+
+# Логика вкладки Регистрации (только для администратора)
+if role == "Администратор":
+    with tab_reg:
+        st.header("👥 Управление регистрациями")
+        
+        pending_regs = get_pending_registrations()
+        
+        if not pending_regs:
+            st.info("✅ Нет ожидающих регистраций")
+        else:
+            st.warning(f"⏳ Ожидающих регистраций: {len(pending_regs)}")
+            
+            for reg in pending_regs:
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([2, 1, 1])
+                    
+                    with col1:
+                        st.markdown(f"**ФИО:** {reg['full_name']}")
+                        st.markdown(f"**Email:** {reg['email']}")
+                        st.markdown(f"**Роль:** {reg['role']}")
+                        st.caption(f"Заявка от: {reg['created_at']}")
+                    
+                    with col2:
+                        if st.button("✅ Одобрить", key=f"approve_{reg['id']}"):
+                            try:
+                                code = approve_registration(reg['id'], user_code)
+                                st.success(f"✅ Пользователь создан: {code}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Ошибка: {e}")
+                    
+                    with col3:
+                        if st.button("❌ Отклонить", key=f"reject_{reg['id']}"):
+                            st.session_state[f"reject_reason_{reg['id']}"] = True
+                    
+                    # Форма отклонения
+                    if st.session_state.get(f"reject_reason_{reg['id']}", False):
+                        reason = st.text_area(
+                            "Причина отклонения",
+                            key=f"reject_reason_text_{reg['id']}",
+                            height=80
+                        )
+                        col_confirm1, col_confirm2 = st.columns(2)
+                        with col_confirm1:
+                            if st.button("✅ Подтвердить отклонение", key=f"confirm_reject_{reg['id']}"):
+                                try:
+                                    reject_registration(reg['id'], user_code, reason)
+                                    st.success("✅ Заявка отклонена")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"❌ Ошибка: {e}")
+                        with col_confirm2:
+                            if st.button("❌ Отмена", key=f"cancel_reject_{reg['id']}"):
+                                st.session_state[f"reject_reason_{reg['id']}"] = False
+                                st.rerun()
+                    
+                    st.divider()
 
 # Логика вкладки Редактор (только если она есть)
 if role not in ["Руководитель", "Наблюдатель"]:
