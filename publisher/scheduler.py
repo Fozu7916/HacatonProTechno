@@ -33,22 +33,41 @@ def publish_next_post(only_due: bool = False, target_groups: list[str] = None):
 
     # 1. Берем самый приоритетный и старый пост со статусом 'ready'
     if only_due:
-        cursor.execute("""
-            SELECT id, suggested_text, priority, attachments
-            FROM post_queue
-            WHERE status = 'ready'
-              AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-            ORDER BY priority DESC, created_at ASC
-            LIMIT 1
-        """)
+        try:
+            cursor.execute("""
+                SELECT id, suggested_text, priority, attachments, target_group_ids
+                FROM post_queue
+                WHERE status = 'ready'
+                  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+                ORDER BY priority DESC, created_at ASC
+                LIMIT 1
+            """)
+        except Exception:
+            cursor.execute("""
+                SELECT id, suggested_text, priority, attachments
+                FROM post_queue
+                WHERE status = 'ready'
+                  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+                ORDER BY priority DESC, created_at ASC
+                LIMIT 1
+            """)
     else:
-        cursor.execute("""
-            SELECT id, suggested_text, priority, attachments
-            FROM post_queue
-            WHERE status = 'ready'
-            ORDER BY priority DESC, created_at ASC
-            LIMIT 1
-        """)
+        try:
+            cursor.execute("""
+                SELECT id, suggested_text, priority, attachments, target_group_ids
+                FROM post_queue
+                WHERE status = 'ready'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT 1
+            """)
+        except Exception:
+            cursor.execute("""
+                SELECT id, suggested_text, priority, attachments
+                FROM post_queue
+                WHERE status = 'ready'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT 1
+            """)
     post = cursor.fetchone()
 
     if not post:
@@ -74,7 +93,11 @@ def publish_next_post(only_due: bool = False, target_groups: list[str] = None):
         return False
     lock_cur.close()
 
-    selected_groups = [str(g).strip().replace("-", "") for g in (target_groups or get_target_group_ids()) if str(g).strip()]
+    post_target_groups = []
+    raw_groups = (post.get("target_group_ids") or "").strip()
+    if raw_groups:
+        post_target_groups = [g.strip().replace("-", "") for g in raw_groups.split(",") if g.strip()]
+    selected_groups = [str(g).strip().replace("-", "") for g in (target_groups or post_target_groups or get_target_group_ids()) if str(g).strip()]
     if not selected_groups:
         print("[Publisher] Ошибка: GROUP_ID/GROUP_IDS не найден в .env")
         cursor.close()

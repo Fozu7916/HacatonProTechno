@@ -50,6 +50,18 @@ def get_available_groups() -> list[dict]:
     return [{"id": int(single), "name": f"Группа {single}", "token": "", "is_active": 1}] if single else []
 
 
+def format_group_ids(raw_group_ids: str, group_name_map: dict[str, str]) -> str:
+    ids = [gid.strip().replace("-", "") for gid in str(raw_group_ids or "").split(",") if gid and gid.strip()]
+    if not ids:
+        return "Не указано"
+    labels = [f"{group_name_map.get(gid, f'Группа {gid}')} ({gid})" for gid in ids]
+    return ", ".join(labels)
+
+
+def parse_group_tags(raw_tags: str) -> list[str]:
+    return [t.strip() for t in str(raw_tags or "").split(",") if t and t.strip()]
+
+
 def generate_text_with_ai(user_prompt: str, role_hint: str = "SMM-редактор") -> str:
     """
     Генерирует текст через OpenRouter/OpenAI-совместимый API.
@@ -295,24 +307,44 @@ if role in ["СММ", "Руководитель", "Администратор"]:
             new_group_id = st.text_input("ID группы", key="new_vk_group_id", placeholder="например: 123456789")
             new_group_name = st.text_input("Название группы", key="new_vk_group_name", placeholder="Название")
             new_group_token = st.text_input("API токен группы", key="new_vk_group_token", type="password")
+            new_group_tags = st.text_input("Теги группы (через запятую)", key="new_vk_group_tags", placeholder="школьные, студенческие")
             if st.button("Сохранить группу", key="save_vk_group_btn"):
                 try:
                     gid = int(str(new_group_id).strip().replace("-", ""))
                     gname = (new_group_name or f"Группа {gid}").strip()
-                    upsert_vk_group(gid, gname, (new_group_token or "").strip(), is_active=True)
+                    upsert_vk_group(gid, gname, (new_group_token or "").strip(), tags=(new_group_tags or "").strip(), is_active=True)
                     st.sidebar.success(f"Группа {gname} сохранена")
                     st.rerun()
                 except Exception as e:
                     st.sidebar.error(f"Ошибка сохранения группы: {e}")
     available_groups = get_available_groups()
     if available_groups:
-        group_options = [str(g["id"]) for g in available_groups]
+        all_tags = sorted({tag for g in available_groups for tag in parse_group_tags(g.get("tags"))})
+        selected_tags = st.sidebar.multiselect(
+            "Теги групп",
+            options=all_tags,
+            default=[],
+            help="Можно выбрать несколько тегов",
+        )
+        filtered_groups = available_groups
+        if selected_tags:
+            selected_tag_set = set(selected_tags)
+            filtered_groups = [
+                g for g in available_groups
+                if selected_tag_set.intersection(set(parse_group_tags(g.get("tags"))))
+            ]
+
+        group_options = [str(g["id"]) for g in filtered_groups]
         group_name_map = {str(g["id"]): g.get("name") or f"Группа {g['id']}" for g in available_groups}
+        group_tags_map = {str(g["id"]): parse_group_tags(g.get("tags")) for g in available_groups}
         selected_group_ids = st.sidebar.multiselect(
             "Группы VK",
             options=group_options,
             default=group_options,
-            format_func=lambda gid: f"{group_name_map.get(gid, 'Группа')} ({gid})",
+            format_func=lambda gid: (
+                f"{group_name_map.get(gid, 'Группа')} ({gid})"
+                + (f" [{', '.join(group_tags_map.get(gid, []))}]" if group_tags_map.get(gid) else "")
+            ),
             help="Выберите группы для парсинга и публикации",
         )
     else:
@@ -724,6 +756,7 @@ if role not in ["Руководитель", "Наблюдатель"]:
                             title=smm_title,
                             author_code=user_code,
                             approver_code=user_code,
+                            target_group_ids=",".join(selected_group_ids) if selected_group_ids else None,
                         )
                         
                         # СММ посты сразу получают статус 'ready', им не нужно одобрение редактора
@@ -773,6 +806,7 @@ if role not in ["Руководитель", "Наблюдатель"]:
                         title=editor_title or (editor_text.splitlines()[0][:255] if editor_text else "Без заголовка"),
                         author_code=user_code,
                         approver_code=user_code,
+                        target_group_ids=",".join(selected_group_ids) if selected_group_ids else None,
                     )
                     conn = get_connection(); cur = conn.cursor()
                     cur.execute(
@@ -944,6 +978,7 @@ if role not in ["Руководитель", "Наблюдатель"]:
                             attachments=attachments,
                             title=vol_title,
                             author_code=user_code,
+                            target_group_ids=",".join(selected_group_ids) if selected_group_ids else None,
                         )
                         
                         conn = get_connection(); cur = conn.cursor()
@@ -976,11 +1011,19 @@ if role != "Наблюдатель":
         st.header("📋 Очередь постов")
     
     conn = get_connection()
-    queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority FROM post_queue", conn)
+    try:
+        queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority, target_group_ids FROM post_queue", conn)
+    except Exception:
+        queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority FROM post_queue", conn)
+        queue_data["target_group_ids"] = None
     vk_posted_data = pd.read_sql("SELECT id, date, text FROM posts ORDER BY date DESC LIMIT 300", conn)
     conn.close()
+    queue_group_name_map = {str(g["id"]): (g.get("name") or f"Группа {g['id']}") for g in get_available_groups()}
     if not queue_data.empty:
         queue_data["scheduled_at"] = pd.to_datetime(queue_data["scheduled_at"], errors="coerce")
+        queue_data["groups_label"] = queue_data["target_group_ids"].apply(
+            lambda raw: format_group_ids(raw, queue_group_name_map)
+        )
 
     # 1. Кастомный календарь с popover над клеткой для редактора, СММ и руководителя
     if role in ["Редактор", "СММ", "Руководитель", "Администратор"]:
@@ -989,6 +1032,8 @@ if role != "Наблюдатель":
         if not queue_data.empty:
             q = queue_data.where(pd.notnull(queue_data), None)
             for _, row in q.iterrows():
+                if (row.get("status") or "") == "posted":
+                    continue
                 sched = row["scheduled_at"]
                 sched_iso = sched.isoformat() if sched is not None and pd.notna(sched) else None
                 posts_payload.append(
@@ -997,6 +1042,7 @@ if role != "Наблюдатель":
                         "suggested_text": row["suggested_text"] or "",
                         "scheduled_at": sched_iso,
                         "status": row["status"] or "pending",
+                        "target_groups_text": row.get("groups_label") or "Не указано",
                     }
                 )
         if not vk_posted_data.empty:
@@ -1012,6 +1058,7 @@ if role != "Наблюдатель":
                         "suggested_text": row["text"] or "",
                         "scheduled_at": dt_iso,
                         "status": "posted",
+                        "target_groups_text": "Импорт из VK",
                     }
                 )
         action = queue_calendar_popup_component(posts_payload, key="queue_calendar_popup_main")
@@ -1058,43 +1105,94 @@ if role != "Наблюдатель":
     # 2. Таблица для всех
     st.subheader("📋 Список очереди")
     if not queue_data.empty:
-        st.dataframe(queue_data, width='stretch')
+        st.caption(f"Всего записей в очереди: {len(queue_data)}")
+        queue_view = queue_data[["id", "scheduled_at", "status", "priority", "groups_label", "suggested_text"]].rename(
+            columns={
+                "id": "ID",
+                "scheduled_at": "Дата публикации",
+                "status": "Статус",
+                "priority": "Приоритет",
+                "groups_label": "Группы VK",
+                "suggested_text": "Текст",
+            }
+        )
+        st.dataframe(queue_view, width='stretch')
     else:
         st.write("Очередь пуста.")
 
 with tab_a:
     st.header("Архив постов из VK")
     conn = get_connection()
-    archive_df = pd.read_sql(
-        """
-        SELECT
-            q.created_at AS date,
-            q.title AS `Заголовок публикации`,
-            q.author_code AS `Автор`,
-            q.approver_code AS `Кто выпустил`,
-            q.suggested_text AS text,
-            NULL AS likes,
-            NULL AS views,
-            NULL AS er
-        FROM post_queue q
-        WHERE q.status = 'posted'
-        UNION ALL
-        SELECT
-            p.date AS date,
-            LEFT(COALESCE(p.text, 'Без заголовка'), 120) AS `Заголовок публикации`,
-            NULL AS `Автор`,
-            NULL AS `Кто выпустил`,
-            p.text AS text,
-            p.likes AS likes,
-            p.views AS views,
-            (p.likes+p.reposts+p.comments)/NULLIF(p.views,0)*100 AS er
-        FROM posts p
-        ORDER BY date DESC
-        LIMIT 80
-        """,
-        conn,
-    )
+    try:
+        archive_df = pd.read_sql(
+            """
+            SELECT
+                q.created_at AS date,
+                q.title AS `Заголовок публикации`,
+                q.author_code AS `Автор`,
+                q.approver_code AS `Кто выпустил`,
+                q.target_group_ids AS group_ids,
+                q.suggested_text AS text,
+                NULL AS likes,
+                NULL AS views,
+                NULL AS er
+            FROM post_queue q
+            WHERE q.status = 'posted'
+            UNION ALL
+            SELECT
+                p.date AS date,
+                LEFT(COALESCE(p.text, 'Без заголовка'), 120) AS `Заголовок публикации`,
+                NULL AS `Автор`,
+                NULL AS `Кто выпустил`,
+                CAST(ABS(p.owner_id) AS CHAR) AS group_ids,
+                p.text AS text,
+                p.likes AS likes,
+                p.views AS views,
+                (p.likes+p.reposts+p.comments)/NULLIF(p.views,0)*100 AS er
+            FROM posts p
+            ORDER BY date DESC
+            LIMIT 80
+            """,
+            conn,
+        )
+    except Exception:
+        archive_df = pd.read_sql(
+            """
+            SELECT
+                q.created_at AS date,
+                q.title AS `Заголовок публикации`,
+                q.author_code AS `Автор`,
+                q.approver_code AS `Кто выпустил`,
+                q.suggested_text AS text,
+                NULL AS likes,
+                NULL AS views,
+                NULL AS er
+            FROM post_queue q
+            WHERE q.status = 'posted'
+            UNION ALL
+            SELECT
+                p.date AS date,
+                LEFT(COALESCE(p.text, 'Без заголовка'), 120) AS `Заголовок публикации`,
+                NULL AS `Автор`,
+                NULL AS `Кто выпустил`,
+                p.text AS text,
+                p.likes AS likes,
+                p.views AS views,
+                (p.likes+p.reposts+p.comments)/NULLIF(p.views,0)*100 AS er
+            FROM posts p
+            ORDER BY date DESC
+            LIMIT 80
+            """,
+            conn,
+        )
+        archive_df["group_ids"] = None
     conn.close()
+    archive_group_name_map = {str(g["id"]): (g.get("name") or f"Группа {g['id']}") for g in get_available_groups()}
+    if not archive_df.empty:
+        archive_df["Группа VK"] = archive_df["group_ids"].apply(
+            lambda raw: format_group_ids(raw, archive_group_name_map)
+        )
+        archive_df = archive_df.drop(columns=["group_ids"])
     st.dataframe(archive_df, width='stretch')
 
 st.markdown("---")

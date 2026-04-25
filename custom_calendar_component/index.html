@@ -53,6 +53,7 @@
       .popup-title { font-weight: 700; font-size: 14px; }
       .close-btn { background: transparent; border: none; color: inherit; cursor: pointer; font-size: 16px; }
       .card { border: 1px solid rgba(148, 163, 184, 0.4); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+      .meta { font-size: 12px; opacity: 0.85; margin: 4px 0 8px; }
       .card textarea { width: 100%; min-height: 72px; border-radius: 6px; border: 1px solid #cbd5e1; padding: 6px; box-sizing: border-box; }
       .card select { width: 100%; margin-top: 6px; padding: 6px; border-radius: 6px; border: 1px solid #cbd5e1; }
       .btn-row { display: flex; gap: 8px; margin-top: 8px; }
@@ -161,6 +162,7 @@
           html += `
             <div class="card" data-post-id="${p.id}">
               <div><strong>${isArchive ? `VK #${Math.abs(Number(p.id))}` : `#${p.id}`}</strong></div>
+              <div class="meta">Группы: ${(p.target_groups_text || "Не указано").replaceAll("<", "&lt;")}</div>
               <textarea id="text_${p.id}">${(p.suggested_text || "").replaceAll("<", "&lt;")}</textarea>
               <select id="status_${p.id}">
                 ${["pending","editing","ready","posted"].map(s => `<option value="${s}" ${p.status===s?"selected":""}>${STATUS_LABELS[s]}</option>`).join("")}

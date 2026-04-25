@@ -24,6 +24,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS posts (
             id            BIGINT PRIMARY KEY,
             owner_id      BIGINT NOT NULL,
+            group_id      BIGINT,
             date          DATETIME NOT NULL,
             text          TEXT,
             likes         INT DEFAULT 0,
@@ -52,6 +53,7 @@ def init_db():
             id         INT PRIMARY KEY,
             name       VARCHAR(255) NOT NULL,
             token      VARCHAR(255) NOT NULL,
+            tags       TEXT,
             is_active  TINYINT(1) DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -64,6 +66,7 @@ def init_db():
             title         VARCHAR(255),
             suggested_text TEXT,
             attachments   TEXT,
+            target_group_ids TEXT,
             priority      INT DEFAULT 1,
             author_role   ENUM('smm', 'volunteer') DEFAULT 'volunteer',
             author_code   VARCHAR(20),
@@ -123,9 +126,12 @@ def init_db():
     """)
     # Мягкая миграция для старых БД
     for col_sql in [
+        "ALTER TABLE posts ADD COLUMN group_id BIGINT",
+        "ALTER TABLE vk_groups ADD COLUMN tags TEXT",
         "ALTER TABLE post_queue ADD COLUMN title VARCHAR(255)",
         "ALTER TABLE post_queue ADD COLUMN author_code VARCHAR(20)",
         "ALTER TABLE post_queue ADD COLUMN approver_code VARCHAR(20)",
+        "ALTER TABLE post_queue ADD COLUMN target_group_ids TEXT",
     ]:
         try:
             cursor.execute(col_sql)
@@ -149,28 +155,29 @@ def get_vk_groups(active_only: bool = True):
     conn = get_connection()
     cursor = conn.cursor(dictionary=True)
     if active_only:
-        cursor.execute("SELECT id, name, token, is_active FROM vk_groups WHERE is_active = 1 ORDER BY id")
+        cursor.execute("SELECT id, name, token, tags, is_active FROM vk_groups WHERE is_active = 1 ORDER BY id")
     else:
-        cursor.execute("SELECT id, name, token, is_active FROM vk_groups ORDER BY id")
+        cursor.execute("SELECT id, name, token, tags, is_active FROM vk_groups ORDER BY id")
     res = cursor.fetchall()
     cursor.close()
     conn.close()
     return res
 
 
-def upsert_vk_group(group_id: int, name: str, token: str, is_active: bool = True):
+def upsert_vk_group(group_id: int, name: str, token: str, tags: str = "", is_active: bool = True):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO vk_groups (id, name, token, is_active)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO vk_groups (id, name, token, tags, is_active)
+        VALUES (%s, %s, %s, %s, %s)
         ON DUPLICATE KEY UPDATE
             name = VALUES(name),
             token = VALUES(token),
+            tags = VALUES(tags),
             is_active = VALUES(is_active)
         """,
-        (group_id, name, token, 1 if is_active else 0),
+        (group_id, name, token, (tags or "").strip(), 1 if is_active else 0),
     )
     conn.commit()
     cursor.close()
@@ -268,15 +275,22 @@ def add_to_queue(
     title: str = None,
     author_code: str = None,
     approver_code: str = None,
+    target_group_ids: str = None,
 ):
     """Добавляет пост в очередь на публикацию."""
     title_val = title or ((text or "").splitlines()[0][:255] if text else "Без заголовка")
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code))
+    try:
+        cursor.execute("""
+            INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code, target_group_ids)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code, target_group_ids))
+    except Exception:
+        cursor.execute("""
+            INSERT INTO post_queue (post_id, title, suggested_text, priority, predicted_er, scheduled_at, attachments, author_code, approver_code)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (post_id, title_val, text, priority, er, scheduled_at, attachments, author_code, approver_code))
     conn.commit()
     cursor.close()
     conn.close()
