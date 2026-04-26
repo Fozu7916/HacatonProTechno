@@ -488,7 +488,7 @@ if role in ["СММ", "Руководитель", "Администратор"]:
     if available_groups:
         all_tags = sorted({tag for g in available_groups for tag in parse_group_tags(g.get("tags"))})
         selected_tags = st.sidebar.multiselect(
-            "Теги групп",
+            "Теги ВК групп",
             options=all_tags,
             default=[],
             help="Можно выбрать несколько тегов",
