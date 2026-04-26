@@ -1248,9 +1248,26 @@ if role != "Наблюдатель":
     except Exception:
         queue_data = pd.read_sql("SELECT id, suggested_text, scheduled_at, status, priority FROM post_queue", conn)
         queue_data["target_group_ids"] = None
-    vk_posted_data = pd.read_sql("SELECT id, date, text FROM posts ORDER BY date DESC LIMIT 300", conn)
+    vk_posted_data = pd.read_sql("SELECT id, date, text, group_id FROM posts ORDER BY date DESC LIMIT 300", conn)
+    
+    # Загружаем посты из Telegram
+    try:
+        tg_posted_data = pd.read_sql(
+            "SELECT id, published_at, text, channel_id FROM telegram_posts ORDER BY published_at DESC LIMIT 300",
+            conn
+        )
+    except Exception:
+        tg_posted_data = pd.DataFrame()
+    
     conn.close()
-    queue_group_name_map = {str(g["id"]): (g.get("name") or f"Группа {g['id']}") for g in get_available_groups()}
+    available_groups = get_available_groups()
+    queue_group_name_map = {str(g["id"]): (g.get("name") or f"Группа {g['id']}") for g in available_groups}
+    queue_group_tags_map = {str(g["id"]): (g.get("tags") or "") for g in available_groups}
+    
+    available_channels = get_telegram_channels(active_only=False)
+    tg_channels_map = {str(ch["id"]): (ch.get("name") or f"Канал {ch['id']}") for ch in available_channels}
+    tg_channels_tags_map = {str(ch["id"]): (ch.get("tags") or "") for ch in available_channels}
+    
     if not queue_data.empty:
         queue_data["scheduled_at"] = pd.to_datetime(queue_data["scheduled_at"], errors="coerce")
         queue_data["groups_label"] = queue_data["target_group_ids"].apply(
@@ -1267,7 +1284,12 @@ if role != "Наблюдатель":
                 if (row.get("status") or "") == "posted":
                     continue
                 sched = row["scheduled_at"]
-                sched_iso = sched.isoformat() if sched is not None and pd.notna(sched) else None
+                # Передаём только дату (YYYY-MM-DD) без времени, чтобы избежать проблем с часовыми поясами
+                if sched is not None and pd.notna(sched):
+                    sched_dt = pd.to_datetime(sched) - pd.Timedelta(days=1)  # Сдвигаем на день назад
+                    sched_iso = sched_dt.strftime("%Y-%m-%d")
+                else:
+                    sched_iso = None
                 posts_payload.append(
                     {
                         "id": int(row["id"]),
@@ -1275,60 +1297,164 @@ if role != "Наблюдатель":
                         "scheduled_at": sched_iso,
                         "status": row["status"] or "pending",
                         "target_groups_text": row.get("groups_label") or "Не указано",
+                        "source": "📋 Очередь",
                     }
                 )
         if not vk_posted_data.empty:
             p = vk_posted_data.where(pd.notnull(vk_posted_data), None)
-            for _, row in p.iterrows():
+            for vk_idx, row in p.iterrows():
                 dt = row["date"]
-                dt_iso = pd.to_datetime(dt, errors="coerce")
-                dt_iso = dt_iso.isoformat() if dt is not None and pd.notna(dt_iso) else None
+                # Передаём только дату (YYYY-MM-DD) без времени
+                if dt is not None and pd.notna(dt):
+                    dt_dt = pd.to_datetime(dt, errors="coerce") - pd.Timedelta(days=1)  # Сдвигаем на день назад
+                    dt_iso = dt_dt.strftime("%Y-%m-%d") if pd.notna(dt_dt) else None
+                else:
+                    dt_iso = None
+                group_id_str = str(row.get("group_id"))
+                group_name = queue_group_name_map.get(group_id_str, f"Группа {row.get('group_id')}")
+                group_tags = queue_group_tags_map.get(group_id_str, "")
+                group_label = f"{group_name} [{group_tags}]" if group_tags else group_name
+                # Используем индекс для создания уникального ID (-1, -2, -3 и т.д.)
+                vk_unique_id = -1 - vk_idx
                 posts_payload.append(
                     {
                         # Отрицательный ID = архивный пост из VK (read-only в попапе)
-                        "id": -int(row["id"]),
+                        "id": vk_unique_id,
                         "suggested_text": row["text"] or "",
                         "scheduled_at": dt_iso,
                         "status": "posted",
-                        "target_groups_text": "Импорт из VK и телеги",
+                        "target_groups_text": f"📱 VK: {group_label}",
+                        "source": "📱 VK",
+                        "vk_row_id": int(row["id"]),  # Сохраняем реальный full_post_id для удаления
+                    }
+                )
+        if not tg_posted_data.empty:
+            t = tg_posted_data.where(pd.notnull(tg_posted_data), None)
+            for idx, row in t.iterrows():
+                dt = row["published_at"]
+                # Передаём только дату (YYYY-MM-DD) без времени
+                if dt is not None and pd.notna(dt):
+                    dt_dt = pd.to_datetime(dt, errors="coerce") - pd.Timedelta(days=1)  # Сдвигаем на день назад
+                    dt_iso = dt_dt.strftime("%Y-%m-%d") if pd.notna(dt_dt) else None
+                else:
+                    dt_iso = None
+                channel_id_str = str(row.get("channel_id"))
+                channel_name = tg_channels_map.get(channel_id_str, f"Канал {row.get('channel_id')}")
+                channel_tags = tg_channels_tags_map.get(channel_id_str, "")
+                channel_label = f"{channel_name} [{channel_tags}]" if channel_tags else channel_name
+                # Используем индекс для создания уникального ID (меньше риск переполнения)
+                tg_unique_id = -2000 - idx  # -2000, -2001, -2002 и т.д.
+                posts_payload.append(
+                    {
+                        # Отрицательный ID для Telegram (read-only в попапе)
+                        "id": tg_unique_id,
+                        "suggested_text": row["text"] or "",
+                        "scheduled_at": dt_iso,
+                        "status": "posted",
+                        "target_groups_text": f"💬 Telegram: {channel_label}",
+                        "source": "💬 Telegram",
+                        "tg_row_id": int(row["id"]),  # Сохраняем реальный ID для удаления
                     }
                 )
         action = queue_calendar_popup_component(posts_payload, key="queue_calendar_popup_main")
+        st.write(f"🔍 Action from calendar: {action}")
         if action and isinstance(action, dict):
+            st.write(f"🔍 Action type: {action.get('action')}")
             if action.get("action") == "save":
                 if int(action.get("post_id")) < 0:
                     st.info("Архивный пост из VK доступен только для просмотра.")
                     st.rerun()
                 conn = get_connection(); cur = conn.cursor()
+                
+                # Подготавливаем дату
+                scheduled_at = action.get("scheduled_at")
+                if scheduled_at:
+                    scheduled_at = f"{scheduled_at} 00:00:00"
+                
                 cur.execute(
-                    "UPDATE post_queue SET suggested_text = %s, status = %s WHERE id = %s",
-                    (action.get("text", ""), action.get("status", "pending"), int(action.get("post_id"))),
+                    "UPDATE post_queue SET suggested_text = %s, status = %s, scheduled_at = %s WHERE id = %s",
+                    (action.get("text", ""), action.get("status", "pending"), scheduled_at, int(action.get("post_id"))),
                 )
                 conn.commit(); cur.close(); conn.close()
                 st.success(f"Пост #{action.get('post_id')} обновлен")
                 st.rerun()
             elif action.get("action") == "delete":
-                if int(action.get("post_id")) < 0:
-                    try:
-                        import vk_api
-                        group_id = os.getenv("GROUP_ID", "").strip().replace("-", "")
-                        if not group_id:
-                            st.error("Не задан GROUP_ID в .env")
-                            st.rerun()
-                        vk = vk_api.VkApi(token=os.getenv("VK_USER_TOKEN")).get_api()
-                        vk_post_id = abs(int(action.get("post_id")))
-                        vk.wall.delete(owner_id=-int(group_id), post_id=vk_post_id)
-                        conn = get_connection(); cur = conn.cursor()
-                        cur.execute("DELETE FROM posts WHERE id = %s", (vk_post_id,))
-                        conn.commit(); cur.close(); conn.close()
-                        st.success(f"Пост VK #{vk_post_id} удален")
-                    except Exception as e:
-                        st.error(f"Не удалось удалить пост в VK: {e}")
-                    st.rerun()
-                conn = get_connection(); cur = conn.cursor()
-                cur.execute("DELETE FROM post_queue WHERE id = %s", (int(action.get("post_id")),))
-                conn.commit(); cur.close(); conn.close()
-                st.warning(f"Пост #{action.get('post_id')} удален")
+                post_id = int(action.get("post_id"))
+                st.info(f"🔍 Удаление поста ID: {post_id}")
+                if post_id < 0:
+                    # Определяем источник по ID
+                    if post_id <= -2000:
+                        # Это Telegram пост (ID от -2000 и ниже)
+                        try:
+                            # Ищем пост в payload по ID
+                            tg_row_id = None
+                            for p in posts_payload:
+                                if p.get("id") == post_id:
+                                    tg_row_id = p.get("tg_row_id")
+                                    break
+                            
+                            if tg_row_id:
+                                conn = get_connection(); cur = conn.cursor()
+                                cur.execute("DELETE FROM telegram_posts WHERE id = %s", (tg_row_id,))
+                                conn.commit()
+                                st.success(f"✅ Пост Telegram #{tg_row_id} удален из БД")
+                                cur.close(); conn.close()
+                            else:
+                                st.error(f"❌ Не найден Telegram пост с ID {post_id}")
+                        except Exception as e:
+                            st.error(f"❌ Ошибка удаления Telegram поста: {e}")
+                    else:
+                        # Это VK пост
+                        try:
+                            import vk_api
+                            # Ищем пост в payload по ID
+                            vk_row_id = None
+                            for p in posts_payload:
+                                if p.get("id") == post_id:
+                                    vk_row_id = p.get("vk_row_id")
+                                    break
+                            
+                            if vk_row_id:
+                                conn = get_connection(); cur = conn.cursor()
+                                cur.execute("SELECT group_id FROM posts WHERE id = %s", (vk_row_id,))
+                                result = cur.fetchone()
+                                
+                                if result:
+                                    group_id = result[0]
+                                    
+                                    # Восстанавливаем post_id: последние 10 цифр из full_post_id
+                                    group_id_str = str(abs(group_id))
+                                    vk_row_id_str = str(vk_row_id).zfill(len(group_id_str) + 10)
+                                    vk_post_id = int(vk_row_id_str[-10:])
+                                    
+                                    vk_user_token = (get_setting("vk_user_token", "") or "").strip() or os.getenv("VK_USER_TOKEN", "").strip()
+                                    if vk_user_token:
+                                        try:
+                                            vk = vk_api.VkApi(token=vk_user_token).get_api()
+                                            vk.wall.delete(owner_id=-int(group_id), post_id=vk_post_id)
+                                            st.info(f"✅ Пост удален из VK (группа {group_id}, пост {vk_post_id})")
+                                        except Exception as vk_err:
+                                            st.warning(f"⚠️ Не удалось удалить из VK: {vk_err}")
+                                    else:
+                                        st.warning("⚠️ VK_USER_TOKEN не задан")
+                                    
+                                    # Удаляем из БД
+                                    cur.execute("DELETE FROM posts WHERE id = %s", (vk_row_id,))
+                                    conn.commit()
+                                    st.success(f"✅ Пост VK #{vk_row_id} удален из БД")
+                                else:
+                                    st.error(f"❌ Пост с ID {vk_row_id} не найден в БД")
+                                cur.close(); conn.close()
+                            else:
+                                st.error(f"❌ Не найден VK пост с ID {post_id}")
+                        except Exception as e:
+                            st.error(f"❌ Ошибка удаления VK поста: {e}")
+                else:
+                    # Это пост из очереди
+                    conn = get_connection(); cur = conn.cursor()
+                    cur.execute("DELETE FROM post_queue WHERE id = %s", (post_id,))
+                    conn.commit(); cur.close(); conn.close()
+                    st.warning(f"Пост #{post_id} удален из очереди")
                 st.rerun()
             elif action.get("action") == "select":
                 st.caption(f"Выбрано: {action.get('date')} · {action.get('status')}")

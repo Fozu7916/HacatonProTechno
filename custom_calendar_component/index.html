@@ -105,15 +105,22 @@
       currentMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth(), 1);
 
       function dateOnly(scheduledAt) {
-        if (!scheduledAt) return new Date().toISOString().slice(0, 10);
+        if (!scheduledAt) {
+          const today = new Date();
+          return today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
+        }
+        // Если это уже в формате YYYY-MM-DD, просто вернём
+        if (typeof scheduledAt === 'string' && scheduledAt.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          return scheduledAt;
+        }
         const d = new Date(scheduledAt);
         if (Number.isNaN(d.getTime())) {
-          return new Date().toISOString().slice(0, 10);
+          const today = new Date();
+          return today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0');
         }
-        return d.toISOString().slice(0, 10);
-      }
-
-      function aggregateEvents(rows) {
+        // Используем локальную дату, а не UTC
+        return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      }      function aggregateEvents(rows) {
         const map = new Map();
         for (const p of rows) {
           const d = dateOnly(p.scheduled_at);
@@ -159,10 +166,15 @@
         `;
         for (const p of list) {
           const isArchive = Number(p.id) < 0;
+          const scheduledDate = dateOnly(p.scheduled_at);
           html += `
             <div class="card" data-post-id="${p.id}">
               <div><strong>${isArchive ? `VK #${Math.abs(Number(p.id))}` : `#${p.id}`}</strong></div>
               <div class="meta">Группы: ${(p.target_groups_text || "Не указано").replaceAll("<", "&lt;")}</div>
+              ${!isArchive ? `<div style="margin-bottom: 8px;">
+                <label style="font-size: 12px; opacity: 0.8;">Дата публикации:</label>
+                <input type="date" id="date_${p.id}" value="${scheduledDate}" style="width: 100%; padding: 6px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box;">
+              </div>` : ''}
               <textarea id="text_${p.id}">${(p.suggested_text || "").replaceAll("<", "&lt;")}</textarea>
               <select id="status_${p.id}">
                 ${["pending","editing","ready","posted"].map(s => `<option value="${s}" ${p.status===s?"selected":""}>${STATUS_LABELS[s]}</option>`).join("")}
@@ -175,8 +187,7 @@
                 }
               </div>
             </div>
-          `;
-        }
+          `;        }
         if (!list.length) {
           html += `<div style="font-size:13px;opacity:0.8;">Постов нет</div>`;
         }
@@ -194,22 +205,24 @@
         document.getElementById("closePopup").onclick = closePopup;
         popup.querySelectorAll("button[data-action]").forEach((btn) => {
           btn.onclick = (e) => {
-            const postId = Number(e.target.getAttribute("data-id"));
+            const postIdStr = e.target.getAttribute("data-id");
+            const postId = parseInt(postIdStr, 10);  // Парсим как целое число, сохраняя знак
             const action = e.target.getAttribute("data-action");
             if (action === "save") {
-              const text = document.getElementById(`text_${postId}`).value;
-              const newStatus = document.getElementById(`status_${postId}`).value;
+              const text = document.getElementById(`text_${postIdStr}`).value;
+              const newStatus = document.getElementById(`status_${postIdStr}`).value;
+              const dateInput = document.getElementById(`date_${postIdStr}`);
+              const newDate = dateInput ? dateInput.value : null;  // YYYY-MM-DD или null
               // Мгновенно обновляем локальное состояние для UI в попапе/календаре.
               posts = posts.map((p) =>
-                Number(p.id) === postId ? { ...p, suggested_text: text, status: newStatus } : p
+                parseInt(p.id, 10) === postId ? { ...p, suggested_text: text, status: newStatus, scheduled_at: newDate ? newDate + 'T00:00:00' : p.scheduled_at } : p
               );
               closePopup();
               renderCalendar();
               setFrameHeight(document.body.scrollHeight + 20);
-              sendValue({ action: "save", post_id: postId, text, status: newStatus });
-            } else {
+              sendValue({ action: "save", post_id: postId, text, status: newStatus, scheduled_at: newDate });            } else {
               // Мгновенно убираем пост из локального состояния, чтобы визуал не "залипал".
-              posts = posts.filter((p) => Number(p.id) !== postId);
+              posts = posts.filter((p) => parseInt(p.id, 10) !== postId);
               closePopup();
               renderCalendar();
               setFrameHeight(document.body.scrollHeight + 20);
@@ -217,7 +230,6 @@
             }
           };
         });
-
         sendValue({ action: "select", date: day, status });
       }
 
