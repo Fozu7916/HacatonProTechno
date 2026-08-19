@@ -1,65 +1,64 @@
-# HacatonProTechno - Система анализа и публикации контента
+# HacatonProTechno - Content Analysis and Publishing System
 
-## 🚀 Описание проекта
+## 🚀 Project Description
 
-HacatonProTechno — это комплексная система для автоматического сбора, анализа и публикации контента из различных социальных сетей (ВКонтакте, Telegram). Проект предназначен для мониторинга активности в заданных группах, генерации подробной статистики и рассылки обработанного, приоритезированного контента пользователям или в целевые группы.
+HacatonProTechno is a comprehensive system for automatically collecting, analyzing, and publishing content from various social networks (VKontakte, Telegram). The project is designed to monitor activity in specified groups, generate detailed statistics, and distribute processed, prioritized content to users or target groups.
 
-Система объединяет возможности парсинга данных, продвинутой аналитики и планового постинга.
+The system combines data parsing, advanced analytics, and scheduled posting.
 
-## ✨ Ключевые функции
+## ✨ Key Features
 
-*   **Мультиплатформенный Парсинг:** Сбор данных с ВКонтакте и Telegram через специализированные модули.
-*   **Глубокий Анализ Контента (Analytics):** Расчет приоритета контента, обработка входящих постов (`processor.py`), получение детальной статистики пользователей и групп, генерация PDF-отчетов.
-*   **Автоматическая Публикация:** Планирование и рассылка отфильтрованного и подготовленного контента в целевые группы через модули `publisher`.
-*   **Менеджмент Истории Данных:** Поддержка сложной логики для работы с историческими данными (например, расчет статистики за последние 7 дней).
+* **Multi-Platform Parsing:** Collects data from VKontakte and Telegram through specialized modules.
+* **Deep Content Analysis (Analytics):** Calculates content priority, processes incoming posts (`processor.py`), obtains detailed user and group statistics, and generates PDF reports.
+* **Automatic Publishing:** Scheduling and distributing filtered and prepared content to target groups via the `publisher` modules.
+* **Historical Data Management:** Support for complex logic for working with historical data (e.g., calculating statistics for the last 7 days).
 
-## 📂 Архитектура проекта
+## 📂 Project Architecture
 
-Проект разделен на три ключевых функциональных блока, обеспечивающих прозрачный и модульный процесс обработки информации:
+The project is divided into three key functional blocks, ensuring a transparent and modular data processing process:
 
-1.  **`parser/` (Парсинг данных):**
-    *   Отвечает за извлечение сырых данных из внешних источников (VK, TG).
-    *   Включает специализированные парсеры (`telegram_parser`, `vk_parser`) для работы с API и получением постов, комментариев, фото и документов.
+1. **`parser/` (Data Parsing):**
+* Responsible for extracting raw data from external sources (VK, TG).
+* Includes specialized parsers (`telegram_parser`, `vk_parser`) for working with the API and retrieving posts, comments, photos, and documents.
 
-2.  **`analytics/` (Аналитика):**
-    *   Ядро бизнес-логики. Получает сырые данные от `parser`.
-    *   Вычисляет метрики (`calculate_priority`), обрабатывает контент (`process_incoming_post`).
-    *   Собирает и предоставляет статистику, а также генерирует отчеты (PDF).
+2. **`analytics/` (Analytics):**
+* The core of the business logic. Receives raw data from the `parser`. * Calculates metrics (`calculate_priority`), processes content (`process_incoming_post`).
+* Collects and provides statistics, and generates reports (PDF).
 
-3.  **`publisher/` (Публикация):**
-    *   Отвечает за дистрибуцию обработанного контента.
-    *   Модуль `worker` запускает фоновые задачи по расписанию (`scheduler`), отправляя запланированные сообщения и файлы в целевые группы на Telegram и ВКонтакте.
+3. **`publisher/` (Publishing):**
+* Responsible for distributing processed content.
+* The `worker` module runs background tasks on a schedule (`scheduler`), sending scheduled messages and files to target groups on Telegram and VKontakte.
 
-## ⚙️ Установка и Запуск
+## ⚙️ Installation and Running
 
-### Предварительные требования
-Убедитесь, что у вас установлены необходимые библиотеки Python:
+### Prerequisites
+Make sure you have the necessary Python libraries installed:
 ```bash
 pip install -r requirements.txt
 ```
 
-### Конфигурация
-Настройка токенов API и идентификаторов групп должна быть выполнена в соответствующих файлах (например, `config/settings.py`, если такой файл используется).
+### Configuration
+API tokens and group IDs should be configured in the appropriate files (e.g., `config/settings.py`, if used).
 
-### Запуск системы
+### System Startup
 
-1.  **Запуск парсинга:** Для извлечения данных рекомендуется запустить скрипт, который вызовет парсеры для сбора свежей информации:
-    ```bash
-    python parser/main.py
-    ```
-2.  **Выполнение анализа и генерация отчетов:** После сбора данных можно запустить обработку и получение статистики:
-    ```bash
-    # Пример вызова процесса обработки в зависимости от бизнес-логики
-    python analytics/processor.py 
-    # Или для получения отчета:
-    # python analytics/stats.py
-    ```
-3.  **Запуск публикации (В режиме воркера):** Для активации запланированных рассылок и публикаций, запустите фоновый процесс-воркер:
-    ```bash
-    python publisher/worker.py
-    ```
+1. **Start Parsing:** To extract data, we recommend running a script that will call parsers to gather fresh information:
+```bash
+python parser/main.py
+```
+2. **Perform Analysis and Report Generation:** After collecting data, you can start processing and generating statistics:
+```bash
+# Example of calling the processing process depending on business logic
+python analytics/processor.py
+# Or to generate a report:
+# python analytics/stats.py
+```
+3. **Start Publishing (In Worker Mode):** To activate scheduled mailings and publications, start a background worker process:
+```bash
+python publisher/worker.py
+```
 
-## 📚 Модули и файлы
+## 📚 Modules and Files
 
-*   `app.py`: Основной файл для запуска приложения (точка входа).
-*   `database/db.py`: Управление подключением к базе данных.
+* `app.py`: The main file for launching the application (entry point).
+* `database/db.py`: Manages the connection to the database.
